@@ -69,14 +69,15 @@ fi
 # ── build ─────────────────────────────────────────────────────────────────────
 echo "→ bazel build starting (--jobs=${BAZEL_JOBS})..."
 bazel build \
-  --config=release \
-  --//:contrib_enabled=false \
+  -c opt \
+  --config=macos \
+  --strip=always \
   --jobs="${BAZEL_JOBS}" \
   --show_progress_rate_limit=15 \
   //source/exe:envoy
 
 # ── locate binary ─────────────────────────────────────────────────────────────
-BINARY=$(bazel cquery --config=release --output=files //source/exe:envoy 2>/dev/null | head -1 || true)
+BINARY=$(bazel cquery -c opt --config=macos --output=files //source/exe:envoy 2>/dev/null | head -1 || true)
 if [[ -z "${BINARY}" ]]; then
   BINARY=$(find bazel-bin/source/exe/ -maxdepth 1 -type f -executable 2>/dev/null | head -1 || true)
 fi
