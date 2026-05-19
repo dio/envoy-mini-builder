@@ -49,11 +49,12 @@ release:
   prerelease: auto
   name_template: "v{{.Version}}"
 
-brews:
+homebrew:
   - name: envoy-mini-builder
     repository:
       owner: dio
       name: homebrew-tap
+      branch: main
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     commit_author:
       name: Dhi Aurrahman
