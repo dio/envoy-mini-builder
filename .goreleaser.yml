@@ -51,6 +51,7 @@ release:
 
 brews:
   - name: envoy-mini-builder
+    directory: Formula
     repository:
       owner: dio
       name: homebrew-tap
