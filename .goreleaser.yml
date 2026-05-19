@@ -1,0 +1,67 @@
+version: 2
+
+project_name: envoy-mini-builder
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: envoy-mini-builder
+    main: .
+    binary: envoy-mini-builder
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - arm64
+      - amd64
+    ignore:
+      # No darwin/amd64 -- this tool is designed to be run from an Apple Silicon
+      # machine (or any machine with SSH access to dio@mini). Intel Mac users are
+      # an edge case; add back if needed.
+      - goos: darwin
+        goarch: amd64
+    ldflags:
+      - -s -w
+      - -X github.com/dio/envoy-mini-builder/internal/version.Version={{.Version}}
+      - -X github.com/dio/envoy-mini-builder/internal/version.Commit={{.Commit}}
+      - -X github.com/dio/envoy-mini-builder/internal/version.Date={{.Date}}
+
+archives:
+  - id: default
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  github:
+    owner: dio
+    name: envoy-mini-builder
+  draft: false
+  prerelease: auto
+  name_template: "v{{.Version}}"
+
+brews:
+  - name: envoy-mini-builder
+    repository:
+      owner: dio
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: Dhi Aurrahman
+      email: dio@rockybars.com
+    homepage: "https://github.com/dio/envoy-mini-builder"
+    description: "Build Envoy on a remote Mac mini and publish GitHub release assets"
+    license: "MIT"
+    install: |
+      bin.install "envoy-mini-builder"
+    test: |
+      system "#{bin}/envoy-mini-builder", "--version"
