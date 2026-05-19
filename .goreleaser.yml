@@ -49,7 +49,7 @@ release:
   prerelease: auto
   name_template: "v{{.Version}}"
 
-homebrew:
+brews:
   - name: envoy-mini-builder
     repository:
       owner: dio
