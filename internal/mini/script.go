@@ -104,8 +104,7 @@ fi
 # -c opt:          optimized build (-O2, no debug assertions)
 # --config=macos:  macOS PATH + tcmalloc=disabled + compiler flags
 # --strip=always:  strip DWARF from output (~2x size reduction)
-# --config=release does NOT exist in envoyproxy/envoy — do not use it.
-# --//:contrib_enabled=false does NOT exist — do not use it.
+# Envoy does not provide a separate release config or a contrib-disable flag.
 echo "→ bazel build starting (--jobs=${BAZEL_JOBS})..."
 bazel build \
   -c opt \
