@@ -1,14 +1,18 @@
 package mini
 
-// remoteScript returns the bash script that runs on the Mac mini.
-// It is piped to `bash -s` over SSH stdin.
-// Inputs arrive as env vars (set by the caller's `env KEY=val` prefix).
-// Output: all build logs go to stdout/stderr; the single sentinel line
+// remoteScript is the body of the bash script that runs on the Mac mini.
+// It is concatenated after a shell-safe prologue (see buildPrologue) that
+// exports all user-supplied values as properly quoted variables:
+//
+//	ENVOY_REPO, COMMIT_SHA, PATCH_URL, BAZEL_JOBS, BUILDBUDDY_API_KEY
+//
+// The combined string is piped to `bash -s` over SSH stdin.
+// All build logs go to stdout/stderr; the single sentinel line
 //
 //	BINARY_PATH:/abs/path/to/envoy
 //
-// is emitted to stdout so the Go caller can extract it.
-const remoteScript = `#!/usr/bin/env bash
+// is emitted to stdout for the Go caller to extract.
+const remoteScript = `
 set -euo pipefail
 PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$PATH"
 export PATH
@@ -16,7 +20,6 @@ export PATH
 echo "→ host: $(hostname) $(uname -m) macOS $(sw_vers -productVersion)"
 
 # ── bootstrap ─────────────────────────────────────────────────────────────────
-# Ensure bazelisk, build deps, and Java are present. Safe to re-run.
 BREW=/opt/homebrew/bin/brew
 
 if ! command -v bazel &>/dev/null && ! command -v bazelisk &>/dev/null; then
@@ -50,7 +53,9 @@ if [[ -d "${SRC_DIR}/.git" ]]; then
   cd "${SRC_DIR}"
   git remote set-url origin "${CLONE_URL}"
   git fetch --depth=1 origin "${COMMIT_SHA}" 2>&1 | tail -3
-  git checkout FETCH_HEAD
+  # Reset tracked files before checkout so prior patches/bazelrc edits don't
+  # contaminate this build. git clean handles untracked; git reset handles tracked.
+  git reset --hard FETCH_HEAD
   git clean -fdx --exclude=.cache 2>/dev/null || true
 else
   echo "→ cloning ${ENVOY_REPO} at ${COMMIT_SHA}..."
@@ -60,8 +65,7 @@ else
   git checkout FETCH_HEAD
 fi
 
-# Explicit cd after the if/else so subsequent sections are guaranteed to be
-# in SRC_DIR regardless of which branch was taken.
+# Explicit cd ensures we're in SRC_DIR regardless of which branch above ran.
 cd "${SRC_DIR}"
 echo "→ at $(git rev-parse HEAD)"
 
@@ -76,15 +80,19 @@ if [[ -n "${PATCH_URL:-}" ]]; then
 fi
 
 # ── BuildBuddy (remote cache only on macOS) ───────────────────────────────────
+# Write to a separate file that is try-import'd, not to .bazelrc itself.
+# This avoids contaminating the tracked .bazelrc across builds.
 rm -f .bazelrc.cache
 if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
-  cat >> .bazelrc.cache << EOF
+  cat > .bazelrc.cache << EOF
 build --remote_cache=grpcs://remote.buildbuddy.io
 build --remote_header=x-buildbuddy-api-key=${BUILDBUDDY_API_KEY}
 build --remote_upload_local_results
 build --remote_timeout=3600
 EOF
-  echo "try-import %workspace%/.bazelrc.cache" >> .bazelrc
+  # Only append the try-import if it's not already present (idempotent).
+  grep -qF 'try-import %workspace%/.bazelrc.cache' .bazelrc 2>/dev/null \
+    || echo "try-import %workspace%/.bazelrc.cache" >> .bazelrc
   echo "→ BuildBuddy remote cache enabled"
 else
   echo "→ no BUILDBUDDY_API_KEY — local cache only"
@@ -118,10 +126,10 @@ fi
 ABS_BINARY="${SRC_DIR}/${BINARY}"
 echo "→ binary: ${ABS_BINARY} ($(du -sh "${ABS_BINARY}" | cut -f1))"
 
-# ── verify dynamic_modules symbols ────────────────────────────────────────────
+# ── verify dynamic_modules symbols (mandatory) ────────────────────────────────
 # A stock source build at envoyproxy/envoy main includes the http dynamic
-# modules extension by default. If the nm check fails the extension was not
-# compiled in — do not ship this binary.
+# modules extension by default. Both checks are hard failures — do not emit
+# BINARY_PATH and do not let the caller upload a broken binary.
 echo "→ verifying dynamic_modules symbols..."
 NM_HIT=$(nm -g "${ABS_BINARY}" 2>/dev/null \
   | grep "_envoy_dynamic_module_callback_http_filter_config_define_counter" \
@@ -136,7 +144,9 @@ TOTAL=$(nm -g "${ABS_BINARY}" 2>/dev/null \
   | grep "envoy_dynamic_module_callback_http_filter" | wc -l | tr -d ' ')
 echo "→ dynamic_module http_filter symbols: ${TOTAL} (expect ≥50)"
 if [[ "${TOTAL}" -lt 50 ]]; then
-  echo "WARN: only ${TOTAL} http_filter callback symbols; expected ≥50" >&2
+  echo "ERROR: only ${TOTAL} http_filter callback symbols; expected ≥50" >&2
+  echo "ERROR: extension may be partially compiled in — do not ship" >&2
+  exit 1
 fi
 
 echo "BINARY_PATH:${ABS_BINARY}"

@@ -45,8 +45,9 @@ func (b *Builder) Run(ctx context.Context, localPath string) error {
 
 	// Pass secrets as env vars in the command prefix -- never written to disk.
 	env := b.buildEnv()
+	prologue := b.buildPrologue()
 
-	remoteBinPath, err := b.execScript(ctx, client, env, remoteScript)
+	remoteBinPath, err := b.execScript(ctx, client, env, prologue+remoteScript)
 	if err != nil {
 		return err
 	}
@@ -96,16 +97,33 @@ func (b *Builder) dial() (*ssh.Client, error) {
 }
 
 func (b *Builder) buildEnv() string {
-	pairs := []string{
-		"ENVOY_REPO=" + b.cfg.EnvoyRepo,
-		"COMMIT_SHA=" + b.cfg.CommitSHA,
-		"PATCH_URL=" + b.cfg.PatchURL,
-		"BAZEL_JOBS=" + b.cfg.BazelJobs,
-		"BUILDBUDDY_API_KEY=" + b.cfg.BBKey,
+	// Values are written into the script body via a quoted prologue (see
+	// execScript) rather than being passed on the command line. This avoids
+	// shell splitting on &, ?, spaces, and other special characters in URLs
+	// and tokens. This method now only returns a minimal, safe env prefix
+	// that does not carry user-supplied values.
+	return "env"
+}
+
+// buildPrologue emits a shell snippet that assigns all user-supplied values
+// as quoted variables at the top of the remote script. Single-quote wrapping
+// plus escaped inner single-quotes is the simplest portable approach.
+func (b *Builder) buildPrologue() string {
+	vars := map[string]string{
+		"ENVOY_REPO":          b.cfg.EnvoyRepo,
+		"COMMIT_SHA":          b.cfg.CommitSHA,
+		"PATCH_URL":           b.cfg.PatchURL,
+		"BAZEL_JOBS":          b.cfg.BazelJobs,
+		"BUILDBUDDY_API_KEY":  b.cfg.BBKey,
 	}
-	// env KEY=val KEY=val bash -s < script
-	// Quote values that may have spaces; in practice these are URLs/SHAs/paths.
-	return "env " + strings.Join(pairs, " ")
+	var sb strings.Builder
+	for k, v := range vars {
+		// Single-quote the value; escape any embedded single-quotes as '\''
+		safe := strings.ReplaceAll(v, "'", "'\\''")
+		fmt.Fprintf(&sb, "%s='%s'\n", k, safe)
+	}
+	sb.WriteString("export ENVOY_REPO COMMIT_SHA PATCH_URL BAZEL_JOBS BUILDBUDDY_API_KEY\n")
+	return sb.String()
 }
 
 // execScript runs `env ... bash -s`, pipes the embedded script to stdin,

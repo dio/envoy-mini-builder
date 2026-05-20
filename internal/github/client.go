@@ -119,10 +119,18 @@ type updateReleaseRequest struct {
 	Prerelease bool   `json:"prerelease"`
 }
 
+// publishReleaseRequest contains only the fields we want to patch when
+// publishing. Sending Name="" or Prerelease=false as zero values would
+// overwrite the name set at creation and force prerelease=false even when
+// the release was created as a prerelease.
+type publishReleaseRequest struct {
+	Draft bool `json:"draft"`
+}
+
 // PublishRelease marks a draft release as published.
 func (c *Client) PublishRelease(repo string, releaseID int64) error {
 	url := fmt.Sprintf("%s/repos/%s/releases/%d", apiBase, repo, releaseID)
-	resp, err := c.do("PATCH", url, updateReleaseRequest{Draft: false})
+	resp, err := c.do("PATCH", url, publishReleaseRequest{Draft: false})
 	if err != nil {
 		return err
 	}
