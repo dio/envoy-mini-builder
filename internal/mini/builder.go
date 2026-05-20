@@ -26,6 +26,16 @@ type Builder struct {
 	cfg Config
 }
 
+// remoteScriptRunner reads the uploaded script into a file before executing it.
+// Running `bash -s` directly is fragile because child processes such as
+// Homebrew can consume the remaining script from stdin.
+const remoteScriptRunner = `tmp=$(mktemp "${TMPDIR:-/tmp}/envoy-mini-builder.XXXXXX") &&
+cat > "$tmp" &&
+bash "$tmp"
+status=$?
+rm -f "$tmp"
+exit "$status"`
+
 func NewBuilder(cfg Config) *Builder {
 	return &Builder{cfg: cfg}
 }
@@ -56,7 +66,7 @@ func (b *Builder) Run(ctx context.Context, localPath string) error {
 
 // execScript runs the build script on the remote host via system ssh(1).
 func (b *Builder) execScript(ctx context.Context, script string) (string, error) {
-	args := b.sshArgs("bash -s")
+	args := b.sshArgs(remoteScriptRunner)
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 
 	stdin, err := cmd.StdinPipe()
@@ -91,6 +101,7 @@ func (b *Builder) execScript(ctx context.Context, script string) (string, error)
 			fmt.Println(line)
 		}
 	}
+	scanErr := scanner.Err()
 
 	if err := cmd.Wait(); err != nil {
 		tail := lastLines(stderrBuf.String(), 5)
@@ -98,6 +109,9 @@ func (b *Builder) execScript(ctx context.Context, script string) (string, error)
 			return "", fmt.Errorf("remote build failed: %w\nlast stderr:\n%s", err, tail)
 		}
 		return "", fmt.Errorf("remote build failed: %w", err)
+	}
+	if scanErr != nil {
+		return "", fmt.Errorf("read remote stdout: %w", scanErr)
 	}
 	if remoteBinPath == "" {
 		return "", fmt.Errorf("build succeeded but BINARY_PATH sentinel was not emitted")
