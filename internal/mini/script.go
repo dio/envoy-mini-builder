@@ -81,8 +81,10 @@ fi
 
 # ── BuildBuddy (remote cache only on macOS) ───────────────────────────────────
 # Write to a separate file that is try-import'd, not to .bazelrc itself.
-# This avoids contaminating the tracked .bazelrc across builds.
+# A trap ensures .bazelrc.cache is deleted on script exit (normal or error)
+# so the API key does not persist on disk between builds.
 rm -f .bazelrc.cache
+trap 'rm -f .bazelrc.cache' EXIT
 if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
   cat > .bazelrc.cache << EOF
 build --remote_cache=grpcs://remote.buildbuddy.io

@@ -72,7 +72,10 @@ No passwords. No key copying. Your agent handles it.
 It is never forwarded to the mini.
 
 `BUILDBUDDY_API_KEY` is forwarded to the mini as a process environment variable
-(via `env KEY=val bash -s`) — never written to disk or shell history on mini.
+(via the script prologue piped to `bash -s` stdin). During the build it is
+written to `.bazelrc.cache` in the workspace so Bazel can read it; a `trap`
+deletes that file on script exit regardless of success or failure. It is never
+written to the shell history or any persistent config file on mini.
 
 ## How it works
 
