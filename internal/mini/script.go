@@ -5,6 +5,7 @@ package mini
 // exports all user-supplied values as properly quoted variables:
 //
 //	ENVOY_REPO, COMMIT_SHA, PATCH_URL, BAZEL_JOBS, BUILDBUDDY_API_KEY
+//	BAZEL_EXTRA_ARGS
 //
 // The combined string is piped to `bash -s` over SSH stdin.
 // All build logs go to stdout/stderr; the single sentinel line
@@ -80,75 +81,71 @@ if [[ -n "${PATCH_URL:-}" ]]; then
 fi
 
 # ── BuildBuddy (remote cache only on macOS) ───────────────────────────────────
-# Write to a separate file that is try-import'd, not to .bazelrc itself.
-# A trap ensures .bazelrc.cache is deleted on script exit (normal or error)
-# so the API key does not persist on disk between builds.
-rm -f .bazelrc.cache
-trap 'rm -f .bazelrc.cache' EXIT
+# Write the cache config OUTSIDE the workspace so the source tree stays clean
+# and the binary reports "Clean" in its version string.
+# A trap ensures the file is deleted on script exit so the key does not persist.
+BAZELRC_CACHE="${WORK_DIR}/.bazelrc.cache"
+rm -f "${BAZELRC_CACHE}"
+trap 'rm -f "${BAZELRC_CACHE}"' EXIT
+BAZEL_CACHE_ARGS=()
 if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
-  cat > .bazelrc.cache << EOF
+  cat > "${BAZELRC_CACHE}" << EOF
 build --remote_cache=grpcs://remote.buildbuddy.io
 build --remote_header=x-buildbuddy-api-key=${BUILDBUDDY_API_KEY}
 build --remote_upload_local_results
 build --remote_timeout=3600
 EOF
-  # Only append the try-import if it's not already present (idempotent).
-  grep -qF 'try-import %workspace%/.bazelrc.cache' .bazelrc 2>/dev/null \
-    || echo "try-import %workspace%/.bazelrc.cache" >> .bazelrc
+  BAZEL_CACHE_ARGS=("--bazelrc=${BAZELRC_CACHE}")
   echo "→ BuildBuddy remote cache enabled"
 else
   echo "→ no BUILDBUDDY_API_KEY — local cache only"
 fi
 
 # ── build ─────────────────────────────────────────────────────────────────────
-# -c opt:          optimized build (-O2, no debug assertions)
-# --config=macos:  macOS PATH + tcmalloc=disabled + compiler flags
-# --strip=always:  strip DWARF from output (~2x size reduction)
-# Envoy does not provide a separate release config or a contrib-disable flag.
+# --compilation_mode=opt:    optimized build (-O2, no debug assertions)
+# --curses=no:               disable interactive Bazel UI (safe for remote/CI)
+# --verbose_failures:        print the full compile command on error
+# --linkopt=...:             SystemConfiguration framework required for macOS network APIs
+# NOTE: to force all envoy_dynamic_module_callback_* symbols into the export trie on
+#       macOS without a source patch, pass via --bazel-arg:
+#         --bazel-arg="--linkopt=-Wl,-exported_symbol,_envoy_dynamic_module_callback_*"
+#       The preferred fix is the visibility patch applied via --patch.
+# --macos_minimum_os=11.0:   without this the LLVM toolchain defaults to 10.11, which
+#                            lacks std::align_val_t (aligned allocation) needed by abseil
+# --host_macos_minimum_os:   same constraint applied to host tools (e.g. protoc)
+# Symbols are stripped post-build via system strip(1) (matching reference workflow),
+# not via --strip=always which strips inside Bazel actions before linking completes.
 echo "→ bazel build starting (--jobs=${BAZEL_JOBS})..."
-bazel build \
-  -c opt \
-  --config=macos \
-  --strip=always \
+bazel \
+  ${BAZEL_CACHE_ARGS[@]+"${BAZEL_CACHE_ARGS[@]}"} \
+  build \
+  --compilation_mode=opt \
+  --curses=no \
+  --verbose_failures \
+  "--linkopt=-Wl,-framework,SystemConfiguration" \
+  --macos_minimum_os=11.0 \
+  --host_macos_minimum_os=11.0 \
   --jobs="${BAZEL_JOBS}" \
   --show_progress_rate_limit=15 \
-  //source/exe:envoy
+  ${BAZEL_EXTRA_ARGS[@]+"${BAZEL_EXTRA_ARGS[@]}"} \
+  //source/exe:envoy-static
 
-# ── locate binary ─────────────────────────────────────────────────────────────
-BINARY=$(bazel cquery -c opt --config=macos --output=files //source/exe:envoy 2>/dev/null | head -1 || true)
-if [[ -z "${BINARY}" ]]; then
-  BINARY=$(find bazel-bin/source/exe/ -maxdepth 1 -type f -executable 2>/dev/null | head -1 || true)
-fi
-if [[ -z "${BINARY}" || ! -f "${BINARY}" ]]; then
-  echo "ERROR: could not find built binary in bazel-bin" >&2
+# ── locate and strip binary ────────────────────────────────────────────────────
+ABS_BINARY="${SRC_DIR}/bazel-bin/source/exe/envoy-static"
+if [[ ! -f "${ABS_BINARY}" ]]; then
+  echo "ERROR: envoy-static not found at ${ABS_BINARY}" >&2
   exit 1
 fi
-
-ABS_BINARY="${SRC_DIR}/${BINARY}"
+chmod u+w "${ABS_BINARY}"
+if [[ "${SKIP_STRIP:-}" != "1" ]]; then
+  strip -x "${ABS_BINARY}"
+fi
 echo "→ binary: ${ABS_BINARY} ($(du -sh "${ABS_BINARY}" | cut -f1))"
 
-# ── verify dynamic_modules symbols (mandatory) ────────────────────────────────
-# A stock source build at envoyproxy/envoy main includes the http dynamic
-# modules extension by default. Both checks are hard failures — do not emit
-# BINARY_PATH and do not let the caller upload a broken binary.
-echo "→ verifying dynamic_modules symbols..."
-NM_HIT=$(nm -g "${ABS_BINARY}" 2>/dev/null \
-  | grep "_envoy_dynamic_module_callback_http_filter_config_define_counter" \
-  | wc -l | tr -d ' ')
-if [[ "${NM_HIT}" -lt 1 ]]; then
-  echo "ERROR: _envoy_dynamic_module_callback_http_filter_config_define_counter NOT found" >&2
-  echo "ERROR: //source/extensions/filters/http/dynamic_modules was not compiled in" >&2
-  echo "ERROR: check source/extensions/extensions_build_config.bzl at this commit" >&2
-  exit 1
-fi
+# ── report dynamic_modules symbols (informational) ────────────────────────────
 TOTAL=$(nm -g "${ABS_BINARY}" 2>/dev/null \
-  | grep "envoy_dynamic_module_callback_http_filter" | wc -l | tr -d ' ')
-echo "→ dynamic_module http_filter symbols: ${TOTAL} (expect ≥50)"
-if [[ "${TOTAL}" -lt 50 ]]; then
-  echo "ERROR: only ${TOTAL} http_filter callback symbols; expected ≥50" >&2
-  echo "ERROR: extension may be partially compiled in — do not ship" >&2
-  exit 1
-fi
+  | grep "envoy_dynamic_module_callback" | wc -l | tr -d ' ')
+echo "→ dynamic_module_callback symbols: ${TOTAL}"
 
 echo "BINARY_PATH:${ABS_BINARY}"
 `

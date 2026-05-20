@@ -19,9 +19,12 @@ type buildFlags struct {
 	releaseTag string
 	noRelease  bool
 	outDir     string
+	suffix     string
+	noStrip    bool
 	sshHost    string
 	sshPort    int
 	bazelJobs  string
+	bazelArgs  []string
 	ghRepo     string
 	bbKey      string
 }
@@ -43,6 +46,9 @@ var buildCmd = &cobra.Command{
   # Build only, no release
   envoy-mini-builder build --sha main --no-release --out ./dist
 
+  # Add repeatable Bazel flags (use = when the value starts with -)
+  envoy-mini-builder build --sha main --bazel-arg=--verbose_failures
+
   # Custom SSH host + BuildBuddy key
   envoy-mini-builder build --sha main --host user@mymac --bb-key <key>`,
 	RunE: runBuild,
@@ -56,9 +62,12 @@ func init() {
 	f.StringVar(&bf.releaseTag, "tag", "", "Release tag (default: envoy-{sha8}-{date})")
 	f.BoolVar(&bf.noRelease, "no-release", false, "Build only — skip release creation and upload")
 	f.StringVar(&bf.outDir, "out", "./dist", "Local directory to save the downloaded binary")
+	f.StringVar(&bf.suffix, "suffix", "", "Suffix appended to the output binary name (e.g. -patched → envoy-macos-arm64-patched)")
+	f.BoolVar(&bf.noStrip, "no-strip", false, "Skip post-build strip (useful for symbol analysis)")
 	f.StringVar(&bf.sshHost, "host", "dio@mini", "SSH host for the Mac mini")
 	f.IntVar(&bf.sshPort, "port", 22, "SSH port")
 	f.StringVar(&bf.bazelJobs, "jobs", "HOST_CPUS", "Bazel --jobs value")
+	f.StringArrayVar(&bf.bazelArgs, "bazel-arg", nil, "Additional Bazel argument appended to build and cquery; repeatable")
 	f.StringVar(&bf.ghRepo, "gh-repo", "dio/envoy-builder", "GitHub repo for release assets (owner/repo)")
 	f.StringVar(&bf.bbKey, "bb-key", "", "BuildBuddy API key for remote cache (overrides BUILDBUDDY_API_KEY env)")
 	_ = buildCmd.MarkFlagRequired("sha")
@@ -97,6 +106,9 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 	}
 	infof("tag:      %s", tag)
 	infof("host:     %s (port %d)", bf.sshHost, bf.sshPort)
+	if len(bf.bazelArgs) > 0 {
+		infof("bazel:    extra args: %s", strings.Join(bf.bazelArgs, " "))
+	}
 	if bf.noRelease {
 		infof("release:  disabled")
 	} else {
@@ -126,14 +138,16 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 		CommitSHA: sha,
 		PatchURL:  bf.patchURL,
 		BazelJobs: bf.bazelJobs,
+		BazelArgs: append([]string(nil), bf.bazelArgs...),
 		BBKey:     bbKey,
+		NoStrip:   bf.noStrip,
 	})
 
 	if err := os.MkdirAll(bf.outDir, 0o755); err != nil {
 		return fmt.Errorf("create out dir: %w", err)
 	}
 
-	localPath := fmt.Sprintf("%s/envoy-macos-arm64", strings.TrimRight(bf.outDir, "/"))
+	localPath := fmt.Sprintf("%s/envoy-macos-arm64%s", strings.TrimRight(bf.outDir, "/"), bf.suffix)
 	if err := bld.Run(cmd.Context(), localPath); err != nil {
 		// If we created a draft release, mark it failed before exiting
 		if !bf.noRelease && releaseID != 0 {
@@ -148,7 +162,7 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 	if !bf.noRelease {
 		header("Publish release")
 		gh := github.NewClient(ghToken)
-		if err := gh.UploadAsset(bf.ghRepo, releaseID, "envoy-macos-arm64", localPath); err != nil {
+		if err := gh.UploadAsset(bf.ghRepo, releaseID, "envoy-macos-arm64"+bf.suffix, localPath); err != nil {
 			return fmt.Errorf("upload asset: %w", err)
 		}
 		okf("Asset uploaded")

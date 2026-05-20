@@ -29,6 +29,8 @@ envoy-mini-builder build --sha <ref> [flags]
 | `--tag` | `envoy-{sha8}-{date}` | Override release tag |
 | `--no-release` | `false` | Build only, skip release create/upload |
 | `--out` | `./dist` | Local directory for the downloaded binary |
+| `--suffix` | | Suffix appended to binary name (e.g. `-patched`) |
+| `--no-strip` | `false` | Skip post-build strip (useful for symbol analysis) |
 | `--host` | `dio@mini` | SSH host of the Mac mini |
 | `--port` | `22` | SSH port |
 | `--jobs` | `HOST_CPUS` | Bazel `--jobs` value |
@@ -61,6 +63,51 @@ envoy-mini-builder build --sha main --host user@192.168.1.10 --port 2222
 |----------|-------------|
 | `GITHUB_TOKEN` | Required for release operations (skip with `--no-release`) |
 | `BUILDBUDDY_API_KEY` | BuildBuddy API key for remote cache on mini |
+
+## Dynamic module symbol export (macOS)
+
+On macOS, Envoy is compiled with `-fvisibility=hidden`. Strong `extern "C"` callback
+functions are NOT placed in the Mach-O export trie, so `strip` removes them and
+`dlsym` cannot resolve them at runtime. This is a macOS-specific issue — on Linux,
+`-rdynamic` exports all global symbols automatically.
+
+Two fixes are available:
+
+### Fix 2 — visibility patch (preferred)
+
+Apply a source patch that adds `#pragma GCC visibility push(default)` around the
+two `extern "C"` blocks that define `envoy_dynamic_module_callback_*` symbols:
+
+```sh
+go run . build \
+  --sha  $SHA \
+  --repo envoyproxy/envoy \
+  --patch https://gist.github.com/dio/c642501419c3513a7d6e992c8b146f93/raw/dynamic-module-export-fix.patch \
+  --no-release --out ./dist
+```
+
+The patch targets:
+- `source/extensions/dynamic_modules/abi_impl.cc`
+- `source/extensions/filters/http/dynamic_modules/abi_impl.cc`
+
+This produces a `Clean` version string (patch is applied before build, workspace
+`.bazelrc` is never touched).
+
+### Fix 1 — linker exported-symbol wildcard (no source changes)
+
+Pass a linker flag via `--bazel-arg` to force all matching symbols into the export
+trie at link time, without modifying source:
+
+```sh
+go run . build \
+  --sha  $SHA \
+  --repo envoyproxy/envoy \
+  "--bazel-arg=--linkopt=-Wl,-exported_symbol,_envoy_dynamic_module_callback_*" \
+  --no-release --out ./dist
+```
+
+Note the leading underscore: macOS linker requires C symbol names to be prefixed
+with `_` in `-exported_symbol` patterns.
 
 ## Auth
 

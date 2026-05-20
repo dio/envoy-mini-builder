@@ -1,6 +1,7 @@
 package mini
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"os"
@@ -56,10 +57,15 @@ func TestBuildPrologueQuotesShellValues(t *testing.T) {
 		CommitSHA: "abc'123",
 		PatchURL:  "",
 		BazelJobs: "HOST_CPUS",
+		BazelArgs: []string{"--verbose_failures", "--define=quoted=a'b", ""},
 		BBKey:     "key'with'quotes",
 	})
 
-	cmd := exec.Command("bash", "-c", b.buildPrologue()+`printf '<%s>\n' "$ENVOY_REPO" "$COMMIT_SHA" "$PATCH_URL" "$BAZEL_JOBS" "$BUILDBUDDY_API_KEY"`)
+	cmd := exec.Command("bash", "-c", b.buildPrologue()+`printf '<%s>\n' "$ENVOY_REPO" "$COMMIT_SHA" "$PATCH_URL" "$BAZEL_JOBS" "$BUILDBUDDY_API_KEY"
+for arg in "${BAZEL_EXTRA_ARGS[@]}"; do
+  printf '[%s]\n' "$arg"
+done
+`)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("run prologue: %v", err)
@@ -72,6 +78,9 @@ func TestBuildPrologueQuotesShellValues(t *testing.T) {
 		"<>",
 		"<HOST_CPUS>",
 		"<key'with'quotes>",
+		"[--verbose_failures]",
+		"[--define=quoted=a'b]",
+		"[]",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("prologue values = %#v, want %#v", got, want)
@@ -107,6 +116,15 @@ func TestRemoteScriptRunnerPreservesExitStatus(t *testing.T) {
 	}
 	if got := exitErr.ExitCode(); got != 7 {
 		t.Fatalf("exit code = %d, want 7", got)
+	}
+}
+
+func TestRemoteScriptRunnerDoesNotUseZshReadonlyStatus(t *testing.T) {
+	if strings.Contains(remoteScriptRunner, "\nstatus=$?") || strings.Contains(remoteScriptRunner, `"$status"`) {
+		t.Fatalf("remoteScriptRunner uses zsh read-only status variable: %s", remoteScriptRunner)
+	}
+	if !strings.Contains(remoteScriptRunner, "exit_status=$?") || !strings.Contains(remoteScriptRunner, `exit "$exit_status"`) {
+		t.Fatalf("remoteScriptRunner does not preserve exit status via exit_status: %s", remoteScriptRunner)
 	}
 }
 
@@ -213,6 +231,61 @@ printf 'binary' > "$dest"
 		if !strings.Contains(args, want) {
 			t.Fatalf("scp args %q missing %q", args, want)
 		}
+	}
+}
+
+func TestProgressPrinterInteractiveMaintainsBazelLine(t *testing.T) {
+	var out strings.Builder
+	printer := newProgressPrinter(&out, true)
+
+	first := "Analyzing: target //source/exe:envoy (5 packages loaded, 0 targets configured)"
+	second := "Analyzing: target //source/exe:envoy (125 packages loaded, 60 targets configured)"
+	printer.printLine(first)
+	printer.printLine(second)
+	printer.printLine("INFO: done")
+
+	got := out.String()
+	if !strings.Contains(got, "\r"+first) || !strings.Contains(got, "\r"+second) {
+		t.Fatalf("interactive progress output = %q, want carriage-return progress updates", got)
+	}
+	if strings.Contains(got, first+"\n"+second) {
+		t.Fatalf("interactive progress output = %q, should not print repeated progress as separate lines", got)
+	}
+	if !strings.HasSuffix(got, "\nINFO: done\n") {
+		t.Fatalf("interactive progress output = %q, want normal line after progress", got)
+	}
+}
+
+func TestProgressPrinterLogModeKeepsLineOrientedOutput(t *testing.T) {
+	var out strings.Builder
+	printer := newProgressPrinter(&out, false)
+
+	printer.printLine("Analyzing: target //source/exe:envoy (5 packages loaded, 0 targets configured)")
+	printer.printLine("Analyzing: target //source/exe:envoy (125 packages loaded, 60 targets configured)")
+
+	got := out.String()
+	if strings.Contains(got, "\r") {
+		t.Fatalf("log-mode output = %q, should not contain carriage returns", got)
+	}
+	if strings.Count(got, "\n") != 2 {
+		t.Fatalf("log-mode output = %q, want one newline per progress record", got)
+	}
+}
+
+func TestSplitLinesAndCarriageReturns(t *testing.T) {
+	scanner := bufio.NewScanner(strings.NewReader("one\rtwo\r\nthree\n"))
+	scanner.Split(splitLinesAndCarriageReturns)
+
+	var got []string
+	for scanner.Scan() {
+		got = append(got, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	want := []string{"one", "two", "three"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tokens = %#v, want %#v", got, want)
 	}
 }
 
