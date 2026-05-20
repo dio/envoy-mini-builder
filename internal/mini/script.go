@@ -88,5 +88,27 @@ fi
 
 ABS_BINARY="${SRC_DIR}/${BINARY}"
 echo "→ binary: ${ABS_BINARY} ($(du -sh "${ABS_BINARY}" | cut -f1))"
+
+# ── verify dynamic_modules symbols ────────────────────────────────────────────
+# A stock source build at envoyproxy/envoy main includes the http dynamic
+# modules extension by default. If the nm check fails the extension was not
+# compiled in — do not ship this binary.
+echo "→ verifying dynamic_modules symbols..."
+NM_HIT=$(nm -g "${ABS_BINARY}" 2>/dev/null \
+  | grep "_envoy_dynamic_module_callback_http_filter_config_define_counter" \
+  | wc -l | tr -d ' ')
+if [[ "${NM_HIT}" -lt 1 ]]; then
+  echo "ERROR: _envoy_dynamic_module_callback_http_filter_config_define_counter NOT found" >&2
+  echo "ERROR: //source/extensions/filters/http/dynamic_modules was not compiled in" >&2
+  echo "ERROR: check source/extensions/extensions_build_config.bzl at this commit" >&2
+  exit 1
+fi
+TOTAL=$(nm -g "${ABS_BINARY}" 2>/dev/null \
+  | grep "envoy_dynamic_module_callback_http_filter" | wc -l | tr -d ' ')
+echo "→ dynamic_module http_filter symbols: ${TOTAL} (expect ≥50)"
+if [[ "${TOTAL}" -lt 50 ]]; then
+  echo "WARN: only ${TOTAL} http_filter callback symbols; expected ≥50" >&2
+fi
+
 echo "BINARY_PATH:${ABS_BINARY}"
 `
