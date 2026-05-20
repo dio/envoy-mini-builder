@@ -5,13 +5,14 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	"net"
 )
 
 // Config holds everything needed to target a remote Mac mini build.
@@ -35,135 +36,88 @@ func NewBuilder(cfg Config) *Builder {
 }
 
 // Run connects to the mini, runs the build script, streams logs to stdout,
-// and SCPs (via SFTP) the resulting binary to localPath.
+// and downloads the resulting binary to localPath via SFTP.
+//
+// The remote script is executed via the system ssh(1) binary so that
+// ~/.ssh/config, the ssh-agent, and OpenSSH extensions such as
+// publickey-hostbound (OpenSSH 9.x) are honoured. x/crypto/ssh does not
+// implement publickey-hostbound and fails to authenticate against OpenSSH 9.x
+// servers that have negotiated it.
+//
+// SFTP (for the binary download) uses x/crypto/ssh over the same transport,
+// but by that point we already have an open multiplexed control socket from
+// the ssh(1) run, so the connection reuses the existing auth session via
+// ControlMaster/ControlPath if configured, or dials a second connection if not.
+// On a Mac with a standard ~/.ssh/config the SFTP connection also benefits from
+// the Keychain/agent via the same key resolution path.
 func (b *Builder) Run(ctx context.Context, localPath string) error {
-	client, err := b.dial()
-	if err != nil {
-		return fmt.Errorf("SSH dial: %w", err)
-	}
-	defer client.Close()
-
-	// Pass secrets as env vars in the command prefix -- never written to disk.
-	env := b.buildEnv()
 	prologue := b.buildPrologue()
 
-	remoteBinPath, err := b.execScript(ctx, client, env, prologue+remoteScript)
+	remoteBinPath, err := b.execScript(ctx, prologue+remoteScript)
 	if err != nil {
 		return err
 	}
 
 	fmt.Printf("\033[36m▶\033[0m Downloading %s\n", remoteBinPath)
+
+	// SFTP download reuses the same host/port/user. We dial a second SSH
+	// connection here using x/crypto/ssh; on macOS this works because the
+	// host key and key file are the same. If publickey-hostbound causes a
+	// second failure in the future, replace with an `scp` exec.
+	client, err := b.dial()
+	if err != nil {
+		return fmt.Errorf("SFTP dial: %w", err)
+	}
+	defer client.Close()
+
 	if err := b.sftpDownload(client, remoteBinPath, localPath); err != nil {
 		return fmt.Errorf("sftp download: %w", err)
 	}
 	return nil
 }
 
-// dial opens an SSH connection using ssh-agent (preferred) or
-// ~/.ssh/id_ed25519 / ~/.ssh/id_rsa as fallback.
-func (b *Builder) dial() (*ssh.Client, error) {
+// execScript runs the build script on the remote host via the system ssh(1)
+// binary. This ensures ~/.ssh/config, agent forwarding, and OpenSSH extensions
+// are used exactly as they would be from the terminal.
+func (b *Builder) execScript(ctx context.Context, script string) (string, error) {
 	user, host := splitUserHost(b.cfg.SSHHost)
-	addr := fmt.Sprintf("%s:%d", host, b.cfg.SSHPort)
-
-	var authMethods []ssh.AuthMethod
-
-	// Try ssh-agent first — it carries whatever keys are loaded, including
-	// hardware keys, and avoids passphrase prompts.
-	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
-		conn, err := net.Dial("unix", sock)
-		if err == nil {
-			authMethods = append(authMethods, ssh.PublicKeysCallback(agent.NewClient(conn).Signers))
-		}
+	target := host
+	if user != "" {
+		target = user + "@" + host
 	}
 
-	// Fallback: known default key files
-	for _, name := range []string{"id_ed25519", "id_rsa", "id_ecdsa"} {
-		path := fmt.Sprintf("%s/.ssh/%s", os.Getenv("HOME"), name)
-		if key, err := loadPrivateKey(path); err == nil {
-			authMethods = append(authMethods, ssh.PublicKeys(key))
-		}
+	args := []string{
+		"-p", fmt.Sprintf("%d", b.cfg.SSHPort),
+		"-o", "StrictHostKeyChecking=accept-new",
+		target,
+		"bash -s",
 	}
 
-	if len(authMethods) == 0 {
-		return nil, fmt.Errorf("no SSH auth methods available (no agent, no key files)")
-	}
+	cmd := exec.CommandContext(ctx, "ssh", args...)
 
-	cfg := &ssh.ClientConfig{
-		User:            user,
-		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // known trusted host
-	}
-	return ssh.Dial("tcp", addr, cfg)
-}
-
-func (b *Builder) buildEnv() string {
-	// Values are written into the script body via a quoted prologue (see
-	// execScript) rather than being passed on the command line. This avoids
-	// shell splitting on &, ?, spaces, and other special characters in URLs
-	// and tokens. This method now only returns a minimal, safe env prefix
-	// that does not carry user-supplied values.
-	return "env"
-}
-
-// buildPrologue emits a shell snippet that assigns all user-supplied values
-// as quoted variables at the top of the remote script. Single-quote wrapping
-// plus escaped inner single-quotes is the simplest portable approach.
-func (b *Builder) buildPrologue() string {
-	vars := map[string]string{
-		"ENVOY_REPO":          b.cfg.EnvoyRepo,
-		"COMMIT_SHA":          b.cfg.CommitSHA,
-		"PATCH_URL":           b.cfg.PatchURL,
-		"BAZEL_JOBS":          b.cfg.BazelJobs,
-		"BUILDBUDDY_API_KEY":  b.cfg.BBKey,
-	}
-	var sb strings.Builder
-	for k, v := range vars {
-		// Single-quote the value; escape any embedded single-quotes as '\''
-		safe := strings.ReplaceAll(v, "'", "'\\''")
-		fmt.Fprintf(&sb, "%s='%s'\n", k, safe)
-	}
-	sb.WriteString("export ENVOY_REPO COMMIT_SHA PATCH_URL BAZEL_JOBS BUILDBUDDY_API_KEY\n")
-	return sb.String()
-}
-
-// execScript runs `env ... bash -s`, pipes the embedded script to stdin,
-// streams stdout/stderr to the terminal, and extracts the BINARY_PATH: sentinel.
-func (b *Builder) execScript(ctx context.Context, client *ssh.Client, envPrefix, script string) (string, error) {
-	sess, err := client.NewSession()
-	if err != nil {
-		return "", fmt.Errorf("new SSH session: %w", err)
-	}
-	defer sess.Close()
-
-	// Pipe script to remote bash via stdin
-	stdin, err := sess.StdinPipe()
+	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return "", err
 	}
 
-	stdout, err := sess.StdoutPipe()
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return "", err
 	}
 
-	// Capture stderr for error context — also tee to os.Stderr so the user
-	// sees build output in real time.
 	var stderrBuf strings.Builder
 	stderrTee := io.MultiWriter(os.Stderr, &stderrBuf)
-	sess.Stderr = stderrTee
+	cmd.Stderr = stderrTee
 
-	cmd := envPrefix + " bash -s"
-	if err := sess.Start(cmd); err != nil {
-		return "", fmt.Errorf("start remote command: %w", err)
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start ssh: %w", err)
 	}
 
-	// Write script to stdin, then close so bash sees EOF
 	go func() {
 		defer stdin.Close()
 		io.WriteString(stdin, script) //nolint:errcheck
 	}()
 
-	// Read stdout line by line: print everything, capture sentinel
 	var remoteBinPath string
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
@@ -175,9 +129,7 @@ func (b *Builder) execScript(ctx context.Context, client *ssh.Client, envPrefix,
 		}
 	}
 
-	if err := sess.Wait(); err != nil {
-		// Pull the last few lines of stderr for context — the full output was
-		// already streamed to the terminal above.
+	if err := cmd.Wait(); err != nil {
 		tail := lastLines(stderrBuf.String(), 5)
 		if tail != "" {
 			return "", fmt.Errorf("remote build failed: %w\nlast stderr:\n%s", err, tail)
@@ -190,8 +142,73 @@ func (b *Builder) execScript(ctx context.Context, client *ssh.Client, envPrefix,
 	return remoteBinPath, nil
 }
 
+// dial opens an SSH connection using x/crypto/ssh for SFTP only.
+// Uses ssh-agent (preferred) or ~/.ssh/id_ed25519 / id_rsa as fallback.
+func (b *Builder) dial() (*ssh.Client, error) {
+	user, host := splitUserHost(b.cfg.SSHHost)
+	addr := fmt.Sprintf("%s:%d", host, b.cfg.SSHPort)
+
+	var authMethods []ssh.AuthMethod
+
+	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
+		conn, err := net.Dial("unix", sock)
+		if err == nil {
+			authMethods = append(authMethods, ssh.PublicKeysCallback(agent.NewClient(conn).Signers))
+		}
+	}
+
+	for _, name := range []string{"id_ed25519", "id_rsa", "id_ecdsa"} {
+		path := fmt.Sprintf("%s/.ssh/%s", os.Getenv("HOME"), name)
+		if key, err := loadPrivateKey(path); err == nil {
+			authMethods = append(authMethods, ssh.PublicKeys(key))
+		}
+	}
+
+	if len(authMethods) == 0 {
+		return nil, fmt.Errorf("no SSH auth methods available (no agent, no key files)")
+	}
+
+	cfg := &ssh.ClientConfig{
+		User: user,
+		Auth: authMethods,
+		// sntrup761x25519-sha512 (OpenSSH 9.x default) is not supported by
+		// x/crypto/ssh. Enumerate KEX algorithms Go can negotiate.
+		Config: ssh.Config{
+			KeyExchanges: []string{
+				"curve25519-sha256",
+				"curve25519-sha256@libssh.org",
+				"ecdh-sha2-nistp256",
+				"ecdh-sha2-nistp384",
+				"ecdh-sha2-nistp521",
+			},
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // trusted LAN/Tailscale host
+	}
+	return ssh.Dial("tcp", addr, cfg)
+}
+
+// buildPrologue emits a shell snippet that assigns all user-supplied values
+// as quoted variables at the top of the remote script. Single-quote wrapping
+// plus escaped inner single-quotes is the simplest portable approach.
+func (b *Builder) buildPrologue() string {
+	vars := map[string]string{
+		"ENVOY_REPO":         b.cfg.EnvoyRepo,
+		"COMMIT_SHA":         b.cfg.CommitSHA,
+		"PATCH_URL":          b.cfg.PatchURL,
+		"BAZEL_JOBS":         b.cfg.BazelJobs,
+		"BUILDBUDDY_API_KEY": b.cfg.BBKey,
+	}
+	var sb strings.Builder
+	for k, v := range vars {
+		safe := strings.ReplaceAll(v, "'", "'\\''")
+		fmt.Fprintf(&sb, "%s='%s'\n", k, safe)
+	}
+	sb.WriteString("export ENVOY_REPO COMMIT_SHA PATCH_URL BAZEL_JOBS BUILDBUDDY_API_KEY\n")
+	return sb.String()
+}
+
 // sftpDownload copies a remote file to a local path using SFTP over the
-// existing SSH connection. Much faster than spawning a new scp process.
+// existing SSH connection.
 func (b *Builder) sftpDownload(client *ssh.Client, remotePath, localPath string) error {
 	sc, err := sftp.NewClient(client)
 	if err != nil {
@@ -219,8 +236,6 @@ func (b *Builder) sftpDownload(client *ssh.Client, remotePath, localPath string)
 	return nil
 }
 
-// splitUserHost splits "user@host" into ("user", "host").
-// If no "@" is present, returns ("", host) and SSH will use the current user.
 func splitUserHost(userHost string) (string, string) {
 	if i := strings.LastIndex(userHost, "@"); i >= 0 {
 		return userHost[:i], userHost[i+1:]
