@@ -8,11 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-
-	"github.com/pkg/sftp"
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
-	"net"
 )
 
 // Config holds everything needed to target a remote Mac mini build.
@@ -35,21 +30,15 @@ func NewBuilder(cfg Config) *Builder {
 	return &Builder{cfg: cfg}
 }
 
-// Run connects to the mini, runs the build script, streams logs to stdout,
-// and downloads the resulting binary to localPath via SFTP.
+// Run executes the build script on the remote host via system ssh(1) and
+// downloads the resulting binary via system scp(1).
 //
-// The remote script is executed via the system ssh(1) binary so that
-// ~/.ssh/config, the ssh-agent, and OpenSSH extensions such as
-// publickey-hostbound (OpenSSH 9.x) are honoured. x/crypto/ssh does not
-// implement publickey-hostbound and fails to authenticate against OpenSSH 9.x
-// servers that have negotiated it.
-//
-// SFTP (for the binary download) uses x/crypto/ssh over the same transport,
-// but by that point we already have an open multiplexed control socket from
-// the ssh(1) run, so the connection reuses the existing auth session via
-// ControlMaster/ControlPath if configured, or dials a second connection if not.
-// On a Mac with a standard ~/.ssh/config the SFTP connection also benefits from
-// the Keychain/agent via the same key resolution path.
+// Both use the system OpenSSH binaries so that ~/.ssh/config, the ssh-agent,
+// and OpenSSH extensions including publickey-hostbound@openssh.com are
+// handled correctly. x/crypto/ssh does not implement the hostbound auth
+// method; while OpenSSH servers support both plain publickey and the hostbound
+// variant (neither is universally mandatory), keeping the entire transport
+// inside the system ssh stack avoids the auth gap on both paths.
 func (b *Builder) Run(ctx context.Context, localPath string) error {
 	prologue := b.buildPrologue()
 
@@ -59,40 +48,15 @@ func (b *Builder) Run(ctx context.Context, localPath string) error {
 	}
 
 	fmt.Printf("\033[36m▶\033[0m Downloading %s\n", remoteBinPath)
-
-	// SFTP download reuses the same host/port/user. We dial a second SSH
-	// connection here using x/crypto/ssh; on macOS this works because the
-	// host key and key file are the same. If publickey-hostbound causes a
-	// second failure in the future, replace with an `scp` exec.
-	client, err := b.dial()
-	if err != nil {
-		return fmt.Errorf("SFTP dial: %w", err)
-	}
-	defer client.Close()
-
-	if err := b.sftpDownload(client, remoteBinPath, localPath); err != nil {
-		return fmt.Errorf("sftp download: %w", err)
+	if err := b.scpDownload(ctx, remoteBinPath, localPath); err != nil {
+		return fmt.Errorf("scp download: %w", err)
 	}
 	return nil
 }
 
-// execScript runs the build script on the remote host via the system ssh(1)
-// binary. This ensures ~/.ssh/config, agent forwarding, and OpenSSH extensions
-// are used exactly as they would be from the terminal.
+// execScript runs the build script on the remote host via system ssh(1).
 func (b *Builder) execScript(ctx context.Context, script string) (string, error) {
-	user, host := splitUserHost(b.cfg.SSHHost)
-	target := host
-	if user != "" {
-		target = user + "@" + host
-	}
-
-	args := []string{
-		"-p", fmt.Sprintf("%d", b.cfg.SSHPort),
-		"-o", "StrictHostKeyChecking=accept-new",
-		target,
-		"bash -s",
-	}
-
+	args := b.sshArgs("bash -s")
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 
 	stdin, err := cmd.StdinPipe()
@@ -106,8 +70,7 @@ func (b *Builder) execScript(ctx context.Context, script string) (string, error)
 	}
 
 	var stderrBuf strings.Builder
-	stderrTee := io.MultiWriter(os.Stderr, &stderrBuf)
-	cmd.Stderr = stderrTee
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
 
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("start ssh: %w", err)
@@ -142,54 +105,55 @@ func (b *Builder) execScript(ctx context.Context, script string) (string, error)
 	return remoteBinPath, nil
 }
 
-// dial opens an SSH connection using x/crypto/ssh for SFTP only.
-// Uses ssh-agent (preferred) or ~/.ssh/id_ed25519 / id_rsa as fallback.
-func (b *Builder) dial() (*ssh.Client, error) {
+// scpDownload copies a remote file to localPath using system scp(1).
+func (b *Builder) scpDownload(ctx context.Context, remotePath, localPath string) error {
 	user, host := splitUserHost(b.cfg.SSHHost)
-	addr := fmt.Sprintf("%s:%d", host, b.cfg.SSHPort)
-
-	var authMethods []ssh.AuthMethod
-
-	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
-		conn, err := net.Dial("unix", sock)
-		if err == nil {
-			authMethods = append(authMethods, ssh.PublicKeysCallback(agent.NewClient(conn).Signers))
-		}
+	remote := fmt.Sprintf("%s:%s", host, remotePath)
+	if user != "" {
+		remote = fmt.Sprintf("%s@%s:%s", user, host, remotePath)
 	}
 
-	for _, name := range []string{"id_ed25519", "id_rsa", "id_ecdsa"} {
-		path := fmt.Sprintf("%s/.ssh/%s", os.Getenv("HOME"), name)
-		if key, err := loadPrivateKey(path); err == nil {
-			authMethods = append(authMethods, ssh.PublicKeys(key))
-		}
+	args := []string{
+		"-P", fmt.Sprintf("%d", b.cfg.SSHPort),
+		"-o", "StrictHostKeyChecking=accept-new",
+		remote,
+		localPath,
 	}
 
-	if len(authMethods) == 0 {
-		return nil, fmt.Errorf("no SSH auth methods available (no agent, no key files)")
+	cmd := exec.CommandContext(ctx, "scp", args...)
+	cmd.Stdout = os.Stderr // scp progress to stderr
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("scp %s: %w", remotePath, err)
 	}
 
-	cfg := &ssh.ClientConfig{
-		User: user,
-		Auth: authMethods,
-		// sntrup761x25519-sha512 (OpenSSH 9.x default) is not supported by
-		// x/crypto/ssh. Enumerate KEX algorithms Go can negotiate.
-		Config: ssh.Config{
-			KeyExchanges: []string{
-				"curve25519-sha256",
-				"curve25519-sha256@libssh.org",
-				"ecdh-sha2-nistp256",
-				"ecdh-sha2-nistp384",
-				"ecdh-sha2-nistp521",
-			},
-		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // trusted LAN/Tailscale host
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return err
 	}
-	return ssh.Dial("tcp", addr, cfg)
+	fmt.Printf("\033[32m✓\033[0m Downloaded %d bytes → %s\n", info.Size(), localPath)
+	return nil
+}
+
+// sshArgs returns the argument list for ssh(1) targeting b.cfg.SSHHost.
+func (b *Builder) sshArgs(remoteCmd string) []string {
+	user, host := splitUserHost(b.cfg.SSHHost)
+	target := host
+	if user != "" {
+		target = user + "@" + host
+	}
+	return []string{
+		"-p", fmt.Sprintf("%d", b.cfg.SSHPort),
+		"-o", "StrictHostKeyChecking=accept-new",
+		target,
+		remoteCmd,
+	}
 }
 
 // buildPrologue emits a shell snippet that assigns all user-supplied values
-// as quoted variables at the top of the remote script. Single-quote wrapping
-// plus escaped inner single-quotes is the simplest portable approach.
+// as quoted variables. Single-quote wrapping with escaped inner single-quotes
+// is the simplest portable approach; values never appear on the command line.
 func (b *Builder) buildPrologue() string {
 	vars := map[string]string{
 		"ENVOY_REPO":         b.cfg.EnvoyRepo,
@@ -207,48 +171,11 @@ func (b *Builder) buildPrologue() string {
 	return sb.String()
 }
 
-// sftpDownload copies a remote file to a local path using SFTP over the
-// existing SSH connection.
-func (b *Builder) sftpDownload(client *ssh.Client, remotePath, localPath string) error {
-	sc, err := sftp.NewClient(client)
-	if err != nil {
-		return err
-	}
-	defer sc.Close()
-
-	src, err := sc.Open(remotePath)
-	if err != nil {
-		return fmt.Errorf("open remote %s: %w", remotePath, err)
-	}
-	defer src.Close()
-
-	dst, err := os.OpenFile(localPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-	if err != nil {
-		return fmt.Errorf("open local %s: %w", localPath, err)
-	}
-	defer dst.Close()
-
-	n, err := io.Copy(dst, src)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("\033[32m✓\033[0m Downloaded %d bytes → %s\n", n, localPath)
-	return nil
-}
-
 func splitUserHost(userHost string) (string, string) {
 	if i := strings.LastIndex(userHost, "@"); i >= 0 {
 		return userHost[:i], userHost[i+1:]
 	}
 	return "", userHost
-}
-
-func loadPrivateKey(path string) (ssh.Signer, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	return ssh.ParsePrivateKey(b)
 }
 
 // lastLines returns the last n non-empty lines of s.
