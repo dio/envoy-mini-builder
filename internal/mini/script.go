@@ -14,7 +14,28 @@ PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$PATH"
 export PATH
 
 echo "→ host: $(hostname) $(uname -m) macOS $(sw_vers -productVersion)"
+
+# ── bootstrap ─────────────────────────────────────────────────────────────────
+# Ensure bazelisk, build deps, and Java are present. Safe to re-run.
+BREW=/opt/homebrew/bin/brew
+
+if ! command -v bazel &>/dev/null && ! command -v bazelisk &>/dev/null; then
+  echo "→ installing bazelisk..."
+  ${BREW} install bazelisk
+fi
 echo "→ bazel: $(bazel version 2>&1 | grep -E 'Bazelisk version|Build label' | head -1)"
+
+for pkg in automake libtool cmake ninja; do
+  if ! command -v "$pkg" &>/dev/null; then
+    echo "→ installing $pkg..."
+    ${BREW} install "$pkg"
+  fi
+done
+
+if ! command -v java &>/dev/null; then
+  echo "→ installing temurin jdk..."
+  ${BREW} install --cask temurin
+fi
 
 # ── workspace ─────────────────────────────────────────────────────────────────
 SLUG=$(echo "${ENVOY_REPO}" | tr '/' '_')
@@ -39,6 +60,9 @@ else
   git checkout FETCH_HEAD
 fi
 
+# Explicit cd after the if/else so subsequent sections are guaranteed to be
+# in SRC_DIR regardless of which branch was taken.
+cd "${SRC_DIR}"
 echo "→ at $(git rev-parse HEAD)"
 
 # ── patch ─────────────────────────────────────────────────────────────────────
@@ -67,6 +91,11 @@ else
 fi
 
 # ── build ─────────────────────────────────────────────────────────────────────
+# -c opt:          optimized build (-O2, no debug assertions)
+# --config=macos:  macOS PATH + tcmalloc=disabled + compiler flags
+# --strip=always:  strip DWARF from output (~2x size reduction)
+# --config=release does NOT exist in envoyproxy/envoy — do not use it.
+# --//:contrib_enabled=false does NOT exist — do not use it.
 echo "→ bazel build starting (--jobs=${BAZEL_JOBS})..."
 bazel build \
   -c opt \

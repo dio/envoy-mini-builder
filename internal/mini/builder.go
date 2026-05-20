@@ -127,7 +127,12 @@ func (b *Builder) execScript(ctx context.Context, client *ssh.Client, envPrefix,
 	if err != nil {
 		return "", err
 	}
-	sess.Stderr = os.Stderr
+
+	// Capture stderr for error context — also tee to os.Stderr so the user
+	// sees build output in real time.
+	var stderrBuf strings.Builder
+	stderrTee := io.MultiWriter(os.Stderr, &stderrBuf)
+	sess.Stderr = stderrTee
 
 	cmd := envPrefix + " bash -s"
 	if err := sess.Start(cmd); err != nil {
@@ -153,7 +158,13 @@ func (b *Builder) execScript(ctx context.Context, client *ssh.Client, envPrefix,
 	}
 
 	if err := sess.Wait(); err != nil {
-		return "", fmt.Errorf("remote build exited with error: %w", err)
+		// Pull the last few lines of stderr for context — the full output was
+		// already streamed to the terminal above.
+		tail := lastLines(stderrBuf.String(), 5)
+		if tail != "" {
+			return "", fmt.Errorf("remote build failed: %w\nlast stderr:\n%s", err, tail)
+		}
+		return "", fmt.Errorf("remote build failed: %w", err)
 	}
 	if remoteBinPath == "" {
 		return "", fmt.Errorf("build succeeded but BINARY_PATH sentinel was not emitted")
@@ -205,4 +216,16 @@ func loadPrivateKey(path string) (ssh.Signer, error) {
 		return nil, err
 	}
 	return ssh.ParsePrivateKey(b)
+}
+
+// lastLines returns the last n non-empty lines of s.
+func lastLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	var out []string
+	for i := len(lines) - 1; i >= 0 && len(out) < n; i-- {
+		if t := strings.TrimSpace(lines[i]); t != "" {
+			out = append([]string{t}, out...)
+		}
+	}
+	return strings.Join(out, "\n")
 }
