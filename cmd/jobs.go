@@ -202,7 +202,7 @@ func runFetch(cmd *cobra.Command, args []string) error {
 	var localPaths []string
 	var platNames []string
 	for _, j := range matching {
-		b := mini.NewBuilder(mini.Config{SSHHost: j.SSHHost, SSHPort: j.SSHPort})
+		b := mini.NewBuilder(mini.Config{SSHHost: j.SSHHost, SSHPort: j.SSHPort, Platform: mini.Platform(j.Platform)})
 
 		remoteBinPath, err := b.ReadBinaryPath(cmd.Context(), j.RemoteDir)
 		if err != nil {
@@ -310,7 +310,7 @@ func runCancel(cmd *cobra.Command, args []string) error {
 	}
 
 	for _, j := range targets {
-		b := mini.NewBuilder(mini.Config{SSHHost: j.SSHHost, SSHPort: j.SSHPort})
+		b := mini.NewBuilder(mini.Config{SSHHost: j.SSHHost, SSHPort: j.SSHPort, Platform: mini.Platform(j.Platform)})
 		if err := b.CancelJob(cmd.Context(), j.RemoteDir); err != nil {
 			warnf("cancel remote job [%s]: %v (removing local state anyway)", j.Platform, err)
 		} else {

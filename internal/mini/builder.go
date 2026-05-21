@@ -375,7 +375,34 @@ func (b *Builder) execScript(ctx context.Context, runner, script string) (string
 }
 
 // scpDownload copies a remote file to localPath using system scp(1).
+// For Linux builds the remotePath lives inside an OrbStack VM; it is first
+// staged on the Mac mini host via orb cp, then downloaded via scp.
 func (b *Builder) scpDownload(ctx context.Context, remotePath, localPath string) error {
+	plat := b.cfg.Platform.resolved()
+	if plat.IsLinux() {
+		return b.scpDownloadViaOrb(ctx, remotePath, localPath)
+	}
+	return b.scpDownloadDirect(ctx, remotePath, localPath)
+}
+
+// scpDownloadViaOrb copies a file from an OrbStack Linux VM to localPath.
+// It stages the file on the Mac mini host using orb cp, downloads it via scp,
+// then removes the staging file.
+func (b *Builder) scpDownloadViaOrb(ctx context.Context, vmPath, localPath string) error {
+	machine := string(b.cfg.Platform.resolved())
+	base := vmPath[strings.LastIndex(vmPath, "/")+1:]
+	hostTmp := "/tmp/envoy-mini-builder-stage-" + base
+	stageCmd := `PATH=/opt/homebrew/bin:$PATH orb cp ` + machine + ":" + shellQuote(vmPath) + ` ` + shellQuote(hostTmp)
+	if _, err := b.sshOutput(ctx, stageCmd); err != nil {
+		return fmt.Errorf("copy from VM to host: %w", err)
+	}
+	defer func() {
+		_, _ = b.sshOutput(ctx, "rm -f "+shellQuote(hostTmp))
+	}()
+	return b.scpDownloadDirect(ctx, hostTmp, localPath)
+}
+
+func (b *Builder) scpDownloadDirect(ctx context.Context, remotePath, localPath string) error {
 	user, host := splitUserHost(b.cfg.SSHHost)
 	remote := fmt.Sprintf("%s:%s", host, remotePath)
 	if user != "" {
