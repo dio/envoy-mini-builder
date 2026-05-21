@@ -162,6 +162,17 @@ export PATH="$HOME/.local/bin:$PATH"
 
 echo "→ host: $(hostname) $(uname -m) $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-linux}")"
 
+# Envoy's sysroot references __libc_csu_fini/__libc_csu_init which were
+# removed in glibc 2.34 (Ubuntu 22.04+). Builds require Ubuntu 22.04 or older.
+if . /etc/os-release 2>/dev/null && [[ "${ID:-}" == "ubuntu" ]]; then
+  UBUNTU_MAJOR="${VERSION_ID%%.*}"
+  if [[ "$UBUNTU_MAJOR" -ge 24 ]]; then
+    echo "ERROR: Ubuntu ${VERSION_ID} detected. Envoy Linux builds require Ubuntu 22.04." >&2
+    echo "  Recreate your OrbStack machine: orb delete linux-\$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') && orb create ubuntu:22.04 linux-\$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" >&2
+    exit 1
+  fi
+fi
+
 # ── bootstrap ─────────────────────────────────────────────────────────────────
 if ! command -v bazel &>/dev/null && ! command -v bazelisk &>/dev/null; then
   echo "→ installing bazelisk..."
