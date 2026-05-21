@@ -21,6 +21,7 @@ type buildFlags struct {
 	outDir     string
 	suffix     string
 	noStrip    bool
+	platform   string
 	sshHost    string
 	sshPort    int
 	bazelJobs  string
@@ -64,6 +65,7 @@ func init() {
 	f.StringVar(&bf.outDir, "out", "./dist", "Local directory to save the downloaded binary")
 	f.StringVar(&bf.suffix, "suffix", "", "Suffix appended to the output binary name (e.g. -patched → envoy-macos-arm64-patched)")
 	f.BoolVar(&bf.noStrip, "no-strip", false, "Skip post-build strip (useful for symbol analysis)")
+	f.StringVar(&bf.platform, "platform", string(mini.PlatformMacOSArm64), "Target platform: macos-arm64 | linux-arm64 | linux-amd64")
 	f.StringVar(&bf.sshHost, "host", "dio@mini", "SSH host for the Mac mini")
 	f.IntVar(&bf.sshPort, "port", 22, "SSH port")
 	f.StringVar(&bf.bazelJobs, "jobs", "HOST_CPUS", "Bazel --jobs value")
@@ -76,8 +78,22 @@ func init() {
 }
 
 func runBuild(cmd *cobra.Command, _ []string) error {
-	// Resolve BuildBuddy key: flag > env
+	// Validate platform.
+	plat := mini.Platform(bf.platform)
+	switch plat {
+	case mini.PlatformMacOSArm64, mini.PlatformLinuxArm64, mini.PlatformLinuxAmd64:
+	default:
+		return fmt.Errorf("unknown --platform %q: must be macos-arm64, linux-arm64, or linux-amd64", bf.platform)
+	}
+
+	// Resolve BuildBuddy key: flag > platform-specific env > generic env.
+	// Platform-specific env vars: BUILDBUDDY_API_KEY_MACOS_ARM64,
+	// BUILDBUDDY_API_KEY_LINUX_ARM64, BUILDBUDDY_API_KEY_LINUX_AMD64.
 	bbKey := bf.bbKey
+	if bbKey == "" {
+		envKey := "BUILDBUDDY_API_KEY_" + strings.ToUpper(strings.ReplaceAll(bf.platform, "-", "_"))
+		bbKey = os.Getenv(envKey)
+	}
 	if bbKey == "" {
 		bbKey = os.Getenv("BUILDBUDDY_API_KEY")
 	}
@@ -99,6 +115,7 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("GITHUB_TOKEN env var required for release operations (or use --no-release)")
 	}
 
+	infof("platform: %s", bf.platform)
 	infof("repo:     %s", bf.envoyRepo)
 	infof("sha:      %s", sha)
 	if bf.patchURL != "" {
@@ -141,13 +158,14 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 		BazelArgs: append([]string(nil), bf.bazelArgs...),
 		BBKey:     bbKey,
 		NoStrip:   bf.noStrip,
+		Platform:  plat,
 	})
 
 	if err := os.MkdirAll(bf.outDir, 0o755); err != nil {
 		return fmt.Errorf("create out dir: %w", err)
 	}
 
-	localPath := fmt.Sprintf("%s/envoy-macos-arm64%s", strings.TrimRight(bf.outDir, "/"), bf.suffix)
+	localPath := fmt.Sprintf("%s/envoy-%s%s", strings.TrimRight(bf.outDir, "/"), bf.platform, bf.suffix)
 	if err := bld.Run(cmd.Context(), localPath); err != nil {
 		// If we created a draft release, mark it failed before exiting
 		if !bf.noRelease && releaseID != 0 {
@@ -162,7 +180,7 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 	if !bf.noRelease {
 		header("Publish release")
 		gh := github.NewClient(ghToken)
-		if err := gh.UploadAsset(bf.ghRepo, releaseID, "envoy-macos-arm64"+bf.suffix, localPath); err != nil {
+		if err := gh.UploadAsset(bf.ghRepo, releaseID, fmt.Sprintf("envoy-%s%s", bf.platform, bf.suffix), localPath); err != nil {
 			return fmt.Errorf("upload asset: %w", err)
 		}
 		okf("Asset uploaded")

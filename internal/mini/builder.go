@@ -10,6 +10,28 @@ import (
 	"strings"
 )
 
+// Platform identifies the target OS/architecture for the build.
+type Platform string
+
+const (
+	PlatformMacOSArm64 Platform = "macos-arm64"
+	PlatformLinuxArm64 Platform = "linux-arm64"
+	PlatformLinuxAmd64 Platform = "linux-amd64"
+)
+
+// IsLinux reports whether the platform targets a Linux kernel.
+func (p Platform) IsLinux() bool {
+	return p == PlatformLinuxArm64 || p == PlatformLinuxAmd64
+}
+
+// resolved returns the platform, defaulting to PlatformMacOSArm64 if zero.
+func (p Platform) resolved() Platform {
+	if p == "" {
+		return PlatformMacOSArm64
+	}
+	return p
+}
+
 // Config holds everything needed to target a remote Mac mini build.
 type Config struct {
 	SSHHost   string // e.g. "dio@mini" or "192.168.1.10"
@@ -19,8 +41,9 @@ type Config struct {
 	PatchURL  string
 	BazelJobs string
 	BazelArgs []string
-	BBKey     string // BuildBuddy API key; empty = local cache only
-	NoStrip   bool   // skip post-build strip (useful for symbol analysis)
+	BBKey     string   // BuildBuddy API key for current platform; empty = local cache only
+	NoStrip   bool     // skip post-build strip (useful for symbol analysis)
+	Platform  Platform // target platform; defaults to PlatformMacOSArm64 if zero
 }
 
 // Builder executes a remote Envoy build and downloads the result.
@@ -28,15 +51,27 @@ type Builder struct {
 	cfg Config
 }
 
-// remoteScriptRunner reads the uploaded script into a file before executing it.
-// Running `bash -s` directly is fragile because child processes such as
-// Homebrew can consume the remaining script from stdin.
-const remoteScriptRunner = `tmp=$(mktemp "${TMPDIR:-/tmp}/envoy-mini-builder.XXXXXX") &&
+// remoteScriptRunnerDarwin reads the uploaded script into a temp file and
+// executes it directly with bash. Running `bash -s` directly is fragile
+// because child processes such as Homebrew can consume stdin.
+const remoteScriptRunnerDarwin = `tmp=$(mktemp "${TMPDIR:-/tmp}/envoy-mini-builder.XXXXXX") &&
 cat > "$tmp" &&
 bash "$tmp"
 exit_status=$?
 rm -f "$tmp"
 exit "$exit_status"`
+
+// linuxScriptRunner returns the runner that saves the script to a temp file on
+// the Mac mini and pipes it into the target OrbStack Linux machine via orb run.
+func (b *Builder) linuxScriptRunner() string {
+	machine := string(b.cfg.Platform.resolved())
+	return `tmp=$(mktemp "${TMPDIR:-/tmp}/envoy-mini-builder.XXXXXX") &&` + "\n" +
+		`cat > "$tmp" &&` + "\n" +
+		`PATH=/opt/homebrew/bin:$PATH orb run -m ` + shellQuote(machine) + ` bash -s < "$tmp"` + "\n" +
+		`exit_status=$?` + "\n" +
+		`rm -f "$tmp"` + "\n" +
+		`exit "$exit_status"`
+}
 
 func NewBuilder(cfg Config) *Builder {
 	return &Builder{cfg: cfg}
@@ -52,9 +87,16 @@ func NewBuilder(cfg Config) *Builder {
 // variant (neither is universally mandatory), keeping the entire transport
 // inside the system ssh stack avoids the auth gap on both paths.
 func (b *Builder) Run(ctx context.Context, localPath string) error {
-	prologue := b.buildPrologue()
+	plat := b.cfg.Platform.resolved()
 
-	remoteBinPath, err := b.execScript(ctx, prologue+remoteScript)
+	runner := remoteScriptRunnerDarwin
+	script := remoteScriptDarwin
+	if plat.IsLinux() {
+		runner = b.linuxScriptRunner()
+		script = remoteScriptLinux
+	}
+
+	remoteBinPath, err := b.execScript(ctx, runner, b.buildPrologue()+script)
 	if err != nil {
 		return err
 	}
@@ -67,8 +109,8 @@ func (b *Builder) Run(ctx context.Context, localPath string) error {
 }
 
 // execScript runs the build script on the remote host via system ssh(1).
-func (b *Builder) execScript(ctx context.Context, script string) (string, error) {
-	args := b.sshArgs(remoteScriptRunner)
+func (b *Builder) execScript(ctx context.Context, runner, script string) (string, error) {
+	args := b.sshArgs(runner)
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 
 	stdin, err := cmd.StdinPipe()
@@ -194,12 +236,33 @@ func (b *Builder) buildPrologue() string {
 		fmt.Fprintf(&sb, "%s=%s\n", k, shellQuote(v))
 	}
 	sb.WriteString("BAZEL_EXTRA_ARGS=(\n")
-	for _, arg := range b.cfg.BazelArgs {
+	for _, arg := range b.filteredBazelArgs() {
 		fmt.Fprintf(&sb, "  %s\n", shellQuote(arg))
 	}
 	sb.WriteString(")\n")
 	sb.WriteString("export ENVOY_REPO COMMIT_SHA PATCH_URL BAZEL_JOBS BUILDBUDDY_API_KEY\n")
 	return sb.String()
+}
+
+// filteredBazelArgs returns the BazelArgs that apply to the current platform.
+// An arg prefixed with "<platform>:" is scoped to that platform only; an arg
+// with no recognized platform prefix applies to all platforms.
+func (b *Builder) filteredBazelArgs() []string {
+	plat := b.cfg.Platform.resolved()
+	var out []string
+	for _, arg := range b.cfg.BazelArgs {
+		if i := strings.Index(arg, ":"); i >= 0 {
+			switch Platform(arg[:i]) {
+			case PlatformMacOSArm64, PlatformLinuxArm64, PlatformLinuxAmd64:
+				if Platform(arg[:i]) == plat {
+					out = append(out, arg[i+1:])
+				}
+				continue
+			}
+		}
+		out = append(out, arg)
+	}
+	return out
 }
 
 func shellQuote(v string) string {

@@ -88,13 +88,13 @@ done
 }
 
 func TestRemoteScriptRunnerWritesExecutesRemovesTempFile(t *testing.T) {
-	cmd := exec.Command("bash", "-c", remoteScriptRunner)
+	cmd := exec.Command("bash", "-c", remoteScriptRunnerDarwin)
 	cmd.Stdin = strings.NewReader(`printf 'SCRIPT_PATH:%s\n' "$0"
 test -f "$0"
 `)
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("remoteScriptRunner failed: %v", err)
+		t.Fatalf("remoteScriptRunnerDarwin failed: %v", err)
 	}
 
 	path := strings.TrimPrefix(strings.TrimSpace(string(out)), "SCRIPT_PATH:")
@@ -107,7 +107,7 @@ test -f "$0"
 }
 
 func TestRemoteScriptRunnerPreservesExitStatus(t *testing.T) {
-	cmd := exec.Command("bash", "-c", remoteScriptRunner)
+	cmd := exec.Command("bash", "-c", remoteScriptRunnerDarwin)
 	cmd.Stdin = strings.NewReader("exit 7\n")
 	err := cmd.Run()
 	var exitErr *exec.ExitError
@@ -120,11 +120,11 @@ func TestRemoteScriptRunnerPreservesExitStatus(t *testing.T) {
 }
 
 func TestRemoteScriptRunnerDoesNotUseZshReadonlyStatus(t *testing.T) {
-	if strings.Contains(remoteScriptRunner, "\nstatus=$?") || strings.Contains(remoteScriptRunner, `"$status"`) {
-		t.Fatalf("remoteScriptRunner uses zsh read-only status variable: %s", remoteScriptRunner)
+	if strings.Contains(remoteScriptRunnerDarwin, "\nstatus=$?") || strings.Contains(remoteScriptRunnerDarwin, `"$status"`) {
+		t.Fatalf("remoteScriptRunnerDarwin uses zsh read-only status variable: %s", remoteScriptRunnerDarwin)
 	}
-	if !strings.Contains(remoteScriptRunner, "exit_status=$?") || !strings.Contains(remoteScriptRunner, `exit "$exit_status"`) {
-		t.Fatalf("remoteScriptRunner does not preserve exit status via exit_status: %s", remoteScriptRunner)
+	if !strings.Contains(remoteScriptRunnerDarwin, "exit_status=$?") || !strings.Contains(remoteScriptRunnerDarwin, `exit "$exit_status"`) {
+		t.Fatalf("remoteScriptRunnerDarwin does not preserve exit status via exit_status: %s", remoteScriptRunnerDarwin)
 	}
 }
 
@@ -142,7 +142,7 @@ printf 'BINARY_PATH:/tmp/envoy\n'
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	b := NewBuilder(Config{SSHHost: "dio@mini", SSHPort: 2222})
-	got, err := b.execScript(context.Background(), "echo build\n")
+	got, err := b.execScript(context.Background(), remoteScriptRunnerDarwin, "echo build\n")
 	if err != nil {
 		t.Fatalf("execScript returned error: %v", err)
 	}
@@ -171,7 +171,7 @@ printf 'normal log line\n'
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	b := NewBuilder(Config{SSHHost: "mini", SSHPort: 22})
-	_, err := b.execScript(context.Background(), "echo build\n")
+	_, err := b.execScript(context.Background(), remoteScriptRunnerDarwin, "echo build\n")
 	if err == nil || !strings.Contains(err.Error(), "BINARY_PATH sentinel") {
 		t.Fatalf("execScript error = %v, want missing sentinel error", err)
 	}
@@ -189,7 +189,7 @@ exit 42
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	b := NewBuilder(Config{SSHHost: "mini", SSHPort: 22})
-	_, err := b.execScript(context.Background(), "echo build\n")
+	_, err := b.execScript(context.Background(), remoteScriptRunnerDarwin, "echo build\n")
 	if err == nil {
 		t.Fatal("execScript succeeded, want failure")
 	}
@@ -286,6 +286,88 @@ func TestSplitLinesAndCarriageReturns(t *testing.T) {
 	want := []string{"one", "two", "three"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("tokens = %#v, want %#v", got, want)
+	}
+}
+
+func TestPlatformIsLinux(t *testing.T) {
+	if PlatformMacOSArm64.IsLinux() {
+		t.Fatal("macos-arm64 reported as Linux")
+	}
+	if !PlatformLinuxArm64.IsLinux() {
+		t.Fatal("linux-arm64 not reported as Linux")
+	}
+	if !PlatformLinuxAmd64.IsLinux() {
+		t.Fatal("linux-amd64 not reported as Linux")
+	}
+}
+
+func TestFilteredBazelArgs(t *testing.T) {
+	tests := []struct {
+		name     string
+		platform Platform
+		args     []string
+		want     []string
+	}{
+		{
+			name:     "unscoped args pass through all platforms",
+			platform: PlatformMacOSArm64,
+			args:     []string{"--verbose_failures", "--define=foo=bar"},
+			want:     []string{"--verbose_failures", "--define=foo=bar"},
+		},
+		{
+			name:     "matching platform scoped arg included",
+			platform: PlatformLinuxArm64,
+			args:     []string{"linux-arm64:--some-flag", "--unscoped"},
+			want:     []string{"--some-flag", "--unscoped"},
+		},
+		{
+			name:     "non-matching platform scoped arg excluded",
+			platform: PlatformMacOSArm64,
+			args:     []string{"linux-arm64:--linux-only", "--common"},
+			want:     []string{"--common"},
+		},
+		{
+			name:     "all three platforms mixed",
+			platform: PlatformLinuxAmd64,
+			args: []string{
+				"macos-arm64:--mac-flag",
+				"linux-arm64:--arm-flag",
+				"linux-amd64:--amd-flag",
+				"--always",
+			},
+			want: []string{"--amd-flag", "--always"},
+		},
+		{
+			name:     "zero platform defaults to macos-arm64",
+			platform: "",
+			args:     []string{"macos-arm64:--mac-flag", "linux-arm64:--linux-flag"},
+			want:     []string{"--mac-flag"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := NewBuilder(Config{Platform: tt.platform, BazelArgs: tt.args})
+			got := b.filteredBazelArgs()
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("filteredBazelArgs() = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLinuxScriptRunnerContainsOrbRun(t *testing.T) {
+	b := NewBuilder(Config{Platform: PlatformLinuxArm64})
+	runner := b.linuxScriptRunner()
+	for _, want := range []string{
+		"orb run -m",
+		"linux-arm64",
+		`bash -s < "$tmp"`,
+		"exit_status=$?",
+		`exit "$exit_status"`,
+	} {
+		if !strings.Contains(runner, want) {
+			t.Fatalf("linuxScriptRunner() missing %q", want)
+		}
 	}
 }
 
