@@ -190,12 +190,21 @@ if [[ ${#PKGS[@]} -gt 0 ]]; then
   sudo apt-get install -y -qq "${PKGS[@]}"
 fi
 
-# The LLVM toolchain downloaded by Bazel links against libtinfo.so.5 which was
-# removed in Ubuntu 24.04. Symlink from libtinfo.so.6 if needed.
-TINFO_DIR="/lib/$(uname -m)-linux-gnu"
-if [[ ! -e "${TINFO_DIR}/libtinfo.so.5" && -e "${TINFO_DIR}/libtinfo.so.6" ]]; then
-  echo "→ symlinking libtinfo.so.5 → libtinfo.so.6 (Ubuntu 24.04 compat)"
-  sudo ln -sf "${TINFO_DIR}/libtinfo.so.6" "${TINFO_DIR}/libtinfo.so.5"
+# The LLVM toolchain downloaded by Bazel links against libtinfo.so.5 with the
+# versioned symbol NCURSES_TINFO_5.0.19991023, which was removed in Ubuntu 24.04.
+# A symlink from libtinfo.so.6 is not sufficient because the symbol versions differ.
+# Install the real libtinfo5 package; fall back to fetching the .deb from Ubuntu 22.04.
+TINFO="/lib/$(uname -m)-linux-gnu/libtinfo.so.5"
+if [[ ! -e "$TINFO" ]] || ! strings "$TINFO" 2>/dev/null | grep -q NCURSES_TINFO_5; then
+  echo "→ installing libtinfo5 for LLVM toolchain compatibility..."
+  sudo apt-get install -y -qq libtinfo5 2>/dev/null || {
+    # libtinfo5 not in 24.04 main/universe — fetch directly from Ubuntu 22.04
+    ARCH=$(dpkg --print-architecture)
+    BASE="http://archive.ubuntu.com/ubuntu/pool/universe/n/ncurses"
+    [[ "$ARCH" == "arm64" ]] && BASE="http://ports.ubuntu.com/ubuntu-ports/pool/universe/n/ncurses"
+    curl -fsSL "${BASE}/libtinfo5_6.3-2_${ARCH}.deb" -o /tmp/libtinfo5.deb
+    sudo dpkg -i /tmp/libtinfo5.deb
+  }
 fi
 
 # ── workspace ─────────────────────────────────────────────────────────────────
