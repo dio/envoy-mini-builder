@@ -157,6 +157,9 @@ const remoteScriptLinux = `
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
+# Ensure user-local bin is on PATH for bazelisk installed below.
+export PATH="$HOME/.local/bin:$PATH"
+
 echo "→ host: $(hostname) $(uname -m) $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-linux}")"
 
 # ── bootstrap ─────────────────────────────────────────────────────────────────
@@ -165,11 +168,12 @@ if ! command -v bazel &>/dev/null && ! command -v bazelisk &>/dev/null; then
   ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
   sudo apt-get update -qq
   sudo apt-get install -y -qq curl ca-certificates
+  mkdir -p "$HOME/.local/bin"
   curl -fsSL \
     "https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-${ARCH}" \
-    -o /tmp/bazelisk
-  sudo install -m 0755 /tmp/bazelisk /usr/local/bin/bazelisk
-  sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
+    -o "$HOME/.local/bin/bazelisk"
+  chmod +x "$HOME/.local/bin/bazelisk"
+  ln -sf "$HOME/.local/bin/bazelisk" "$HOME/.local/bin/bazel"
 fi
 echo "→ bazel: $(bazel version 2>&1 | grep -E 'Bazelisk version|Build label' | head -1)"
 
