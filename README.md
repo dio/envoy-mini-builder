@@ -38,6 +38,7 @@ envoy-mini-builder build --sha <ref> [flags]
 | `--patch` | | Raw URL to a `.patch` file applied before build |
 | `--tag` | `envoy-{sha8}` | Override release tag; e.g. `envoy-abcdef12-patched` for variants |
 | `--no-release` | `false` | Build only, skip release create/upload |
+| `--force-build` | `false` | Always rebuild even if the asset already exists in the release |
 | `--out` | `./dist` | Local directory for the downloaded binary |
 | `--suffix` | | Suffix appended to binary/asset name (e.g. `-patched`) |
 | `--no-strip` | `false` | Skip post-build `strip -x` (useful for symbol analysis) |
@@ -168,20 +169,18 @@ The default tag `envoy-{sha8}` gives one canonical release per Envoy commit.
 Use `--tag` + `--suffix` together for patch/variant builds to keep both the
 release and the asset names unambiguous.
 
-### Re-downloading without rebuilding
+### Default: download if exists, build if not
 
-If the release already exists, skip the build entirely:
+The default behavior checks the release for each platform's asset before
+building. If the asset already exists it is downloaded; only missing assets
+trigger a remote build. Use `--force-build` to always rebuild:
 
 ```sh
-# Single platform
-envoy-mini-builder build --sha abc123ef --download-only
+# Downloads existing asset if found, otherwise builds
+envoy-mini-builder build --sha abc123ef
 
-# All platforms
-envoy-mini-builder build --sha abc123ef --all-platforms --download-only
-
-# Patched variant (must match --tag and --suffix used at build time)
-envoy-mini-builder build --sha abc123ef \
-  --tag envoy-abc123ef-patched --suffix=-patched --download-only
+# Force rebuild even if the asset is already published
+envoy-mini-builder build --sha abc123ef --force-build
 ```
 
 The mini keeps its workspace at `~/envoy-builder/{repo}/src/` between runs.
