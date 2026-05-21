@@ -33,16 +33,35 @@ func runJobs(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	fmt.Printf("%-20s %-14s %-12s %s\n", "TAG", "PLATFORM", "STATUS", "STARTED")
+	// Group by tag, preserving first-seen order.
+	var tagOrder []string
+	byTag := map[string][]mini.Job{}
 	for _, j := range jobs {
-		b := mini.NewBuilder(mini.Config{SSHHost: j.SSHHost, SSHPort: j.SSHPort})
-		status, err := b.JobStatus(cmd.Context(), j.RemoteDir)
-		if err != nil {
-			status = "error"
+		if _, seen := byTag[j.Tag]; !seen {
+			tagOrder = append(tagOrder, j.Tag)
 		}
-		display := formatStatus(status)
-		started := j.StartedAt.Local().Format("2006-01-02 15:04")
-		fmt.Printf("%-20s %-14s %-12s %s\n", j.Tag, j.Platform, display, started)
+		byTag[j.Tag] = append(byTag[j.Tag], j)
+	}
+
+	fmt.Printf("%-22s %-14s %-12s %s\n", "TAG", "PLATFORM", "STATUS", "STARTED")
+	for i, tag := range tagOrder {
+		if i > 0 {
+			fmt.Println()
+		}
+		for k, j := range byTag[tag] {
+			b := mini.NewBuilder(mini.Config{SSHHost: j.SSHHost, SSHPort: j.SSHPort})
+			status, err := b.JobStatus(cmd.Context(), j.RemoteDir)
+			if err != nil {
+				status = "error"
+			}
+			display := formatStatus(status)
+			started := j.StartedAt.Local().Format("2006-01-02 15:04")
+			tagCol := ""
+			if k == 0 {
+				tagCol = tag
+			}
+			fmt.Printf("%-22s %-14s %-12s %s\n", tagCol, j.Platform, display, started)
+		}
 	}
 	return nil
 }

@@ -22,6 +22,17 @@ func (b *Builder) Download(ctx context.Context, remotePath, localPath string) er
 //  3. Starts the build in the background via nohup.
 //  4. Saves the background PID.
 //  5. Prints JOB_DIR with the expanded absolute path.
+// detachedBuildCmd returns the shell command that executes the build script
+// inside the correct environment (bash directly for macOS, orb run for Linux).
+func (b *Builder) detachedBuildCmd(buildSh string) string {
+	plat := b.cfg.Platform.resolved()
+	if plat.IsLinux() {
+		machine := shellQuote(string(plat))
+		return `PATH=/opt/homebrew/bin:$PATH orb run -m ` + machine + ` bash -s < ` + shellQuote(buildSh)
+	}
+	return `bash ` + shellQuote(buildSh)
+}
+
 func (b *Builder) detachedRunner(jobDir string) string {
 	buildSh := shellQuote(jobDir + "/build.sh")
 	buildLog := shellQuote(jobDir + "/build.log")
@@ -29,7 +40,8 @@ func (b *Builder) detachedRunner(jobDir string) string {
 	binaryPath := shellQuote(jobDir + "/binary_path")
 	pidFile := shellQuote(jobDir + "/pid")
 
-	inner := "bash " + buildSh + " > " + buildLog + " 2>&1; echo $? > " + exitCode + "; grep " +
+	buildCmd := b.detachedBuildCmd(jobDir + "/build.sh")
+	inner := buildCmd + " > " + buildLog + " 2>&1; echo $? > " + exitCode + "; grep " +
 		shellQuote("^BINARY_PATH:") + " " + buildLog + " 2>/dev/null | tail -1 | sed " +
 		shellQuote("s/^BINARY_PATH://") + " > " + binaryPath
 
@@ -48,12 +60,13 @@ func (b *Builder) detachedRunner(jobDir string) string {
 // the actual expanded path is returned via the JOB_DIR sentinel in stdout and
 // stored in the returned RemoteDir.
 func (b *Builder) StartDetached(ctx context.Context, jobDir string) (string, error) {
-	if b.cfg.Platform.resolved().IsLinux() {
-		return "", fmt.Errorf("detached mode not yet supported for Linux platforms")
-	}
+	plat := b.cfg.Platform.resolved()
 
 	runner := b.detachedRunner(jobDir)
 	script := b.buildPrologue() + remoteScriptDarwin
+	if plat.IsLinux() {
+		script = b.buildPrologue() + remoteScriptLinux
+	}
 
 	args := b.sshArgs(runner)
 	cmd := exec.CommandContext(ctx, "ssh", args...)
