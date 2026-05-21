@@ -168,6 +168,16 @@ func (b *Builder) ReadBinaryPath(ctx context.Context, remoteDir string) (string,
 	return strings.TrimSpace(string(out)), nil
 }
 
+// CancelJob kills the background build process and removes the remote job dir.
+// It is a best-effort operation: errors from kill or rm are returned but the
+// caller should still remove local job state regardless.
+func (b *Builder) CancelJob(ctx context.Context, remoteDir string) error {
+	pidFile := jobPath(remoteDir + "/pid")
+	remoteCmd := `pid=$(cat ` + pidFile + ` 2>/dev/null); [ -n "$pid" ] && kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null; rm -rf ` + jobPath(remoteDir)
+	_, err := b.sshOutput(ctx, remoteCmd)
+	return err
+}
+
 // TailLog SSHes to the remote host and tails the build log, connecting
 // stdout/stderr to os.Stdout/os.Stderr.
 func (b *Builder) TailLog(ctx context.Context, remoteDir string) error {

@@ -236,6 +236,60 @@ func runFetch(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// ── cancel ────────────────────────────────────────────────────────────────────
+
+var (
+	cancelCmd      *cobra.Command
+	cancelPlatform string
+)
+
+func init() {
+	cancelCmd = &cobra.Command{
+		Use:   "cancel <tag>",
+		Short: "Kill a running detached build and remove its job state",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runCancel,
+	}
+	cancelCmd.Flags().StringVar(&cancelPlatform, "platform", "", "Cancel only this platform (default: all platforms for the tag)")
+	rootCmd.AddCommand(cancelCmd)
+}
+
+func runCancel(cmd *cobra.Command, args []string) error {
+	tag := args[0]
+
+	jobs, err := mini.LoadJobs()
+	if err != nil {
+		return fmt.Errorf("load jobs: %w", err)
+	}
+
+	var targets []mini.Job
+	for _, j := range jobs {
+		if j.Tag != tag {
+			continue
+		}
+		if cancelPlatform != "" && j.Platform != cancelPlatform {
+			continue
+		}
+		targets = append(targets, j)
+	}
+	if len(targets) == 0 {
+		return fmt.Errorf("no jobs found for tag %q (platform=%q)", tag, cancelPlatform)
+	}
+
+	for _, j := range targets {
+		b := mini.NewBuilder(mini.Config{SSHHost: j.SSHHost, SSHPort: j.SSHPort})
+		if err := b.CancelJob(cmd.Context(), j.RemoteDir); err != nil {
+			warnf("cancel remote job [%s]: %v (removing local state anyway)", j.Platform, err)
+		} else {
+			okf("Cancelled [%s]", j.Platform)
+		}
+		if err := mini.RemoveJob(j.Tag, j.Platform); err != nil {
+			warnf("remove job state [%s]: %v", j.Platform, err)
+		}
+	}
+	return nil
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func findJob(tag, platform string) (*mini.Job, error) {
