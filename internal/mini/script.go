@@ -163,8 +163,8 @@ echo "→ host: $(hostname) $(uname -m) $(. /etc/os-release 2>/dev/null && echo 
 if ! command -v bazel &>/dev/null && ! command -v bazelisk &>/dev/null; then
   echo "→ installing bazelisk..."
   ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-  apt-get update -qq
-  apt-get install -y -qq curl ca-certificates
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq curl ca-certificates
   curl -fsSL \
     "https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-${ARCH}" \
     -o /usr/local/bin/bazelisk
@@ -182,8 +182,8 @@ for check in "gcc:gcc" "cmake:cmake" "ninja:ninja-build" "libtoolize:libtool" \
 done
 if [[ ${#PKGS[@]} -gt 0 ]]; then
   echo "→ installing ${PKGS[*]}..."
-  apt-get update -qq
-  apt-get install -y -qq "${PKGS[@]}"
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq "${PKGS[@]}"
 fi
 
 # ── workspace ─────────────────────────────────────────────────────────────────
