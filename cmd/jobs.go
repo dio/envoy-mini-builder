@@ -109,14 +109,19 @@ func runLogs(cmd *cobra.Command, args []string) error {
 
 // ── fetch ─────────────────────────────────────────────────────────────────────
 
-var fetchCmd = &cobra.Command{
-	Use:   "fetch <tag>",
-	Short: "Download finished detached builds and publish the GitHub release",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runFetch,
-}
+var (
+	fetchCmd      *cobra.Command
+	fetchPlatform string
+)
 
 func init() {
+	fetchCmd = &cobra.Command{
+		Use:   "fetch <tag>",
+		Short: "Download finished detached builds and publish the GitHub release",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runFetch,
+	}
+	fetchCmd.Flags().StringVar(&fetchPlatform, "platform", "", "Fetch only this platform (default: all platforms for the tag)")
 	rootCmd.AddCommand(fetchCmd)
 }
 
@@ -130,12 +135,16 @@ func runFetch(cmd *cobra.Command, args []string) error {
 
 	var matching []mini.Job
 	for _, j := range jobs {
-		if j.Tag == tag {
-			matching = append(matching, j)
+		if j.Tag != tag {
+			continue
 		}
+		if fetchPlatform != "" && j.Platform != fetchPlatform {
+			continue
+		}
+		matching = append(matching, j)
 	}
 	if len(matching) == 0 {
-		return fmt.Errorf("no jobs found for tag %q", tag)
+		return fmt.Errorf("no jobs found for tag %q (platform=%q)", tag, fetchPlatform)
 	}
 
 	// Check all are done before proceeding.
