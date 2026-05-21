@@ -178,7 +178,7 @@ fi
 echo "→ bazel: $(bazel version 2>&1 | grep -E 'Bazelisk version|Build label' | head -1)"
 
 PKGS=()
-for check in "gcc:gcc" "cmake:cmake" "ninja:ninja-build" "libtoolize:libtool" \
+for check in "gcc:gcc" "git:git" "cmake:cmake" "ninja:ninja-build" "libtoolize:libtool" \
              "automake:automake" "python3:python3" "java:default-jdk-headless" \
              "zip:zip" "unzip:unzip" "patch:patch"; do
   cmd="${check%%:*}"; pkg="${check##*:}"
