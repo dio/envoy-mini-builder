@@ -190,6 +190,14 @@ if [[ ${#PKGS[@]} -gt 0 ]]; then
   sudo apt-get install -y -qq "${PKGS[@]}"
 fi
 
+# The LLVM toolchain downloaded by Bazel links against libtinfo.so.5 which was
+# removed in Ubuntu 24.04. Symlink from libtinfo.so.6 if needed.
+TINFO_DIR="/lib/$(uname -m)-linux-gnu"
+if [[ ! -e "${TINFO_DIR}/libtinfo.so.5" && -e "${TINFO_DIR}/libtinfo.so.6" ]]; then
+  echo "→ symlinking libtinfo.so.5 → libtinfo.so.6 (Ubuntu 24.04 compat)"
+  sudo ln -sf "${TINFO_DIR}/libtinfo.so.6" "${TINFO_DIR}/libtinfo.so.5"
+fi
+
 # ── workspace ─────────────────────────────────────────────────────────────────
 SLUG=$(echo "${ENVOY_REPO}" | tr '/' '_')
 WORK_DIR="${HOME}/envoy-builder/${SLUG}"
