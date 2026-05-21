@@ -32,6 +32,7 @@ type buildFlags struct {
 	bazelArgs    []string
 	ghRepo       string
 	bbKey        string
+	detach       bool
 }
 
 var bf buildFlags
@@ -92,6 +93,7 @@ func init() {
 	f.StringArrayVar(&bf.bazelArgs, "bazel-arg", nil, "Additional Bazel argument appended to build; repeatable; prefix platform: to scope (e.g. linux-arm64:--flag)")
 	f.StringVar(&bf.ghRepo, "gh-repo", "dio/envoy-builder", "GitHub repo for release assets (owner/repo)")
 	f.StringVar(&bf.bbKey, "bb-key", "", "BuildBuddy API key (all platforms); per-platform env vars: BUILDBUDDY_API_KEY_MACOS_ARM64, BUILDBUDDY_API_KEY_LINUX_ARM64, BUILDBUDDY_API_KEY_LINUX_AMD64; fallback: BUILDBUDDY_API_KEY")
+	f.BoolVar(&bf.detach, "detach", false, "Detach after starting — build runs in background on the mini; use 'jobs', 'logs', 'fetch' to manage")
 	_ = buildCmd.MarkFlagRequired("sha")
 
 	rootCmd.AddCommand(buildCmd)
@@ -250,7 +252,8 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 	}
 
 	// ── Ensure release exists for platforms that need building ────────────────
-	if !bf.noRelease {
+	// When --detach is set, skip this step; 'fetch' will create the release.
+	if !bf.noRelease && !bf.detach {
 		header("Ensure release %s", tag)
 		body := releaseBody(bf.envoyRepo, sha, bf.patchURL, platNames)
 		if err := ghEnsureRelease(bf.ghRepo, tag, body); err != nil {
@@ -274,7 +277,6 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 			bbKey = os.Getenv("BUILDBUDDY_API_KEY")
 		}
 
-		header("Remote build on %s [%s]", bf.sshHost, platStr)
 		bld := mini.NewBuilder(mini.Config{
 			SSHHost:   bf.sshHost,
 			SSHPort:   bf.sshPort,
@@ -288,6 +290,36 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 			Platform:  plat,
 		})
 
+		if bf.detach {
+			// ── Detached mode: start the build in background on the mini ──────
+			header("Starting detached build on %s [%s]", bf.sshHost, platStr)
+			jobDir := fmt.Sprintf("${HOME}/envoy-mini-builder/jobs/%s-%s", tag, platStr)
+			remoteDir, err := bld.StartDetached(cmd.Context(), jobDir)
+			if err != nil {
+				return fmt.Errorf("start detached build [%s]: %w", platStr, err)
+			}
+			if err := mini.SaveJob(mini.Job{
+				Tag:       tag,
+				Platform:  platStr,
+				SSHHost:   bf.sshHost,
+				SSHPort:   bf.sshPort,
+				RemoteDir: remoteDir,
+				GHRepo:    bf.ghRepo,
+				Suffix:    bf.suffix,
+				NoRelease: bf.noRelease,
+				StartedAt: time.Now().UTC(),
+			}); err != nil {
+				return fmt.Errorf("save job [%s]: %w", platStr, err)
+			}
+			okf("Build started in background: %s [%s]", tag, platStr)
+			fmt.Printf("  Remote dir: %s\n", remoteDir)
+			fmt.Printf("  Use 'jobs' to check status, 'logs --tag %s --platform %s' to tail logs,\n", tag, platStr)
+			fmt.Printf("  and 'fetch %s' to download and publish when complete.\n", tag)
+			continue
+		}
+
+		// ── Synchronous build ─────────────────────────────────────────────────
+		header("Remote build on %s [%s]", bf.sshHost, platStr)
 		localPath := fmt.Sprintf("%s/%s", outDir, pattern)
 		if err := bld.Run(cmd.Context(), localPath); err != nil {
 			if !bf.noRelease {
@@ -323,6 +355,12 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 			}
 			okf("Asset uploaded: %s", pattern)
 		}
+	}
+
+	// When all platforms were detached, skip publish — 'fetch' handles it.
+	if bf.detach {
+		header("Done — builds running in background")
+		return nil
 	}
 
 	// ── Publish release ───────────────────────────────────────────────────────

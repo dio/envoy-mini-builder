@@ -10,6 +10,168 @@ import (
 	"strings"
 )
 
+// Download copies a remote file to localPath using system scp(1).
+// This is an exported wrapper around scpDownload for use by cmd packages.
+func (b *Builder) Download(ctx context.Context, remotePath, localPath string) error {
+	return b.scpDownload(ctx, remotePath, localPath)
+}
+
+// detachedRunner returns a shell script that:
+//  1. Creates the job directory.
+//  2. Reads stdin into {jobDir}/build.sh.
+//  3. Starts the build in the background via nohup.
+//  4. Saves the background PID.
+//  5. Prints JOB_DIR with the expanded absolute path.
+func (b *Builder) detachedRunner(jobDir string) string {
+	buildSh := shellQuote(jobDir + "/build.sh")
+	buildLog := shellQuote(jobDir + "/build.log")
+	exitCode := shellQuote(jobDir + "/exit_code")
+	binaryPath := shellQuote(jobDir + "/binary_path")
+	pidFile := shellQuote(jobDir + "/pid")
+
+	inner := "bash " + buildSh + " > " + buildLog + " 2>&1; echo $? > " + exitCode + "; grep " +
+		shellQuote("^BINARY_PATH:") + " " + buildLog + " 2>/dev/null | tail -1 | sed " +
+		shellQuote("s/^BINARY_PATH://") + " > " + binaryPath
+
+	return `mkdir -p ` + shellQuote(jobDir) + "\n" +
+		`cat > ` + buildSh + "\n" +
+		`nohup bash -c ` + shellQuote(inner) + ` &` + "\n" +
+		`echo $! > ` + pidFile + "\n" +
+		`echo "JOB_DIR:` + jobDir + `"`
+}
+
+// StartDetached starts a build on the remote host in a detached (background)
+// process. It returns quickly; the build continues on the remote. Only macOS
+// platform is supported.
+//
+// jobDir should be a path containing ${HOME} so the remote shell expands it;
+// the actual expanded path is returned via the JOB_DIR sentinel in stdout and
+// stored in the returned RemoteDir.
+func (b *Builder) StartDetached(ctx context.Context, jobDir string) (string, error) {
+	if b.cfg.Platform.resolved().IsLinux() {
+		return "", fmt.Errorf("detached mode not yet supported for Linux platforms")
+	}
+
+	runner := b.detachedRunner(jobDir)
+	script := b.buildPrologue() + remoteScriptDarwin
+
+	args := b.sshArgs(runner)
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return "", err
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+
+	var stderrBuf strings.Builder
+	stderrWriter := newProgressWriter(os.Stderr, &stderrBuf)
+	cmd.Stderr = stderrWriter
+
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start ssh: %w", err)
+	}
+
+	go func() {
+		defer stdin.Close()
+		io.WriteString(stdin, script) //nolint:errcheck
+	}()
+
+	var remoteDir string
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner.Split(splitLinesAndCarriageReturns)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "JOB_DIR:") {
+			remoteDir = strings.TrimPrefix(line, "JOB_DIR:")
+		} else {
+			fmt.Println(line)
+		}
+	}
+	scanErr := scanner.Err()
+
+	waitErr := cmd.Wait()
+	stderrWriter.finish()
+	if waitErr != nil {
+		tail := lastLines(stderrBuf.String(), 5)
+		if tail != "" {
+			return "", fmt.Errorf("start detached build failed: %w\nlast stderr:\n%s", waitErr, tail)
+		}
+		return "", fmt.Errorf("start detached build failed: %w", waitErr)
+	}
+	if scanErr != nil {
+		return "", fmt.Errorf("read remote stdout: %w", scanErr)
+	}
+	if remoteDir == "" {
+		return "", fmt.Errorf("detached build started but JOB_DIR sentinel was not emitted")
+	}
+	return remoteDir, nil
+}
+
+// JobStatus SSHes to the remote host and returns the status of a detached job.
+// Possible return values: "done:0", "done:N", "running", "unknown".
+func (b *Builder) JobStatus(ctx context.Context, remoteDir string) (string, error) {
+	exitCodeFile := shellQuote(remoteDir + "/exit_code")
+	pidFile := shellQuote(remoteDir + "/pid")
+
+	remoteCmd := `if [ -f ` + exitCodeFile + ` ]; then
+  echo "STATUS:done:$(cat ` + exitCodeFile + `)"
+elif kill -0 $(cat ` + pidFile + ` 2>/dev/null) 2>/dev/null; then
+  echo "STATUS:running"
+else
+  echo "STATUS:unknown"
+fi`
+
+	out, err := b.sshOutput(ctx, remoteCmd)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "STATUS:") {
+			return strings.TrimPrefix(line, "STATUS:"), nil
+		}
+	}
+	return "unknown", nil
+}
+
+// ReadBinaryPath SSHes to the remote host and returns the absolute path of
+// the built binary as recorded in the job directory.
+func (b *Builder) ReadBinaryPath(ctx context.Context, remoteDir string) (string, error) {
+	binaryPathFile := shellQuote(remoteDir + "/binary_path")
+	out, err := b.sshOutput(ctx, "cat "+binaryPathFile)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// TailLog SSHes to the remote host and tails the build log, connecting
+// stdout/stderr to os.Stdout/os.Stderr.
+func (b *Builder) TailLog(ctx context.Context, remoteDir string) error {
+	buildLog := shellQuote(remoteDir + "/build.log")
+	args := b.sshArgs("tail -f " + buildLog)
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// sshOutput runs a remote command and returns its stdout as a byte slice.
+func (b *Builder) sshOutput(ctx context.Context, remoteCmd string) ([]byte, error) {
+	args := b.sshArgs(remoteCmd)
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("ssh %q: %w", remoteCmd, err)
+	}
+	return out, nil
+}
+
 // Platform identifies the target OS/architecture for the build.
 type Platform string
 
