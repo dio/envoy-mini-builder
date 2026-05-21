@@ -28,28 +28,33 @@ func (b *Builder) detachedBuildCmd(buildSh string) string {
 	plat := b.cfg.Platform.resolved()
 	if plat.IsLinux() {
 		machine := shellQuote(string(plat))
-		return `PATH=/opt/homebrew/bin:$PATH orb run -m ` + machine + ` bash -s < ` + shellQuote(buildSh)
+		return `PATH=/opt/homebrew/bin:$PATH orb run -m ` + machine + ` bash -s < ` + jobPath(buildSh)
 	}
-	return `bash ` + shellQuote(buildSh)
+	return `bash ` + jobPath(buildSh)
 }
 
+// jobPath wraps path in double quotes so that $HOME expands on the remote
+// shell. Job dir paths are of the form $HOME/envoy-builder/jobs/… which
+// contain no characters that need escaping inside double quotes.
+func jobPath(path string) string { return `"` + path + `"` }
+
 func (b *Builder) detachedRunner(jobDir string) string {
-	buildSh := shellQuote(jobDir + "/build.sh")
-	buildLog := shellQuote(jobDir + "/build.log")
-	exitCode := shellQuote(jobDir + "/exit_code")
-	binaryPath := shellQuote(jobDir + "/binary_path")
-	pidFile := shellQuote(jobDir + "/pid")
+	buildSh := jobPath(jobDir + "/build.sh")
+	buildLog := jobPath(jobDir + "/build.log")
+	exitCode := jobPath(jobDir + "/exit_code")
+	binaryPath := jobPath(jobDir + "/binary_path")
+	pidFile := jobPath(jobDir + "/pid")
 
 	buildCmd := b.detachedBuildCmd(jobDir + "/build.sh")
 	inner := buildCmd + " > " + buildLog + " 2>&1; echo $? > " + exitCode + "; grep " +
 		shellQuote("^BINARY_PATH:") + " " + buildLog + " 2>/dev/null | tail -1 | sed " +
 		shellQuote("s/^BINARY_PATH://") + " > " + binaryPath
 
-	return `mkdir -p ` + shellQuote(jobDir) + "\n" +
+	return `mkdir -p ` + jobPath(jobDir) + "\n" +
 		`cat > ` + buildSh + "\n" +
 		`nohup bash -c ` + shellQuote(inner) + ` </dev/null >/dev/null 2>&1 &` + "\n" +
 		`echo $! > ` + pidFile + "\n" +
-		`echo "JOB_DIR:` + jobDir + `"`
+		`printf 'JOB_DIR:%s\n' ` + jobPath(jobDir)
 }
 
 // StartDetached starts a build on the remote host in a detached (background)
@@ -129,8 +134,8 @@ func (b *Builder) StartDetached(ctx context.Context, jobDir string) (string, err
 // JobStatus SSHes to the remote host and returns the status of a detached job.
 // Possible return values: "done:0", "done:N", "running", "unknown".
 func (b *Builder) JobStatus(ctx context.Context, remoteDir string) (string, error) {
-	exitCodeFile := shellQuote(remoteDir + "/exit_code")
-	pidFile := shellQuote(remoteDir + "/pid")
+	exitCodeFile := jobPath(remoteDir + "/exit_code")
+	pidFile := jobPath(remoteDir + "/pid")
 
 	remoteCmd := `if [ -f ` + exitCodeFile + ` ]; then
   echo "STATUS:done:$(cat ` + exitCodeFile + `)"
@@ -155,7 +160,7 @@ fi`
 // ReadBinaryPath SSHes to the remote host and returns the absolute path of
 // the built binary as recorded in the job directory.
 func (b *Builder) ReadBinaryPath(ctx context.Context, remoteDir string) (string, error) {
-	binaryPathFile := shellQuote(remoteDir + "/binary_path")
+	binaryPathFile := jobPath(remoteDir + "/binary_path")
 	out, err := b.sshOutput(ctx, "cat "+binaryPathFile)
 	if err != nil {
 		return "", err
@@ -166,7 +171,7 @@ func (b *Builder) ReadBinaryPath(ctx context.Context, remoteDir string) (string,
 // TailLog SSHes to the remote host and tails the build log, connecting
 // stdout/stderr to os.Stdout/os.Stderr.
 func (b *Builder) TailLog(ctx context.Context, remoteDir string) error {
-	buildLog := shellQuote(remoteDir + "/build.log")
+	buildLog := jobPath(remoteDir + "/build.log")
 	args := b.sshArgs("tail -f " + buildLog)
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	cmd.Stdout = os.Stdout

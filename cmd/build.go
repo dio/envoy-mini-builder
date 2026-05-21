@@ -293,7 +293,7 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 		if bf.detach {
 			// ── Detached mode: start the build in background on the mini ──────
 			header("Starting detached build on %s [%s]", bf.sshHost, platStr)
-			jobDir := fmt.Sprintf("${HOME}/envoy-mini-builder/jobs/%s-%s", tag, platStr)
+			jobDir := fmt.Sprintf("$HOME/envoy-builder/jobs/%s-%s", tag, platStr)
 			remoteDir, err := bld.StartDetached(cmd.Context(), jobDir)
 			if err != nil {
 				return fmt.Errorf("start detached build [%s]: %w", platStr, err)
