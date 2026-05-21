@@ -35,7 +35,7 @@ func (b *Builder) detachedRunner(jobDir string) string {
 
 	return `mkdir -p ` + shellQuote(jobDir) + "\n" +
 		`cat > ` + buildSh + "\n" +
-		`nohup bash -c ` + shellQuote(inner) + ` &` + "\n" +
+		`nohup bash -c ` + shellQuote(inner) + ` </dev/null >/dev/null 2>&1 &` + "\n" +
 		`echo $! > ` + pidFile + "\n" +
 		`echo "JOB_DIR:` + jobDir + `"`
 }

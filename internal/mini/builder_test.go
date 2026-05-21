@@ -371,6 +371,24 @@ func TestLinuxScriptRunnerContainsOrbRun(t *testing.T) {
 	}
 }
 
+func TestDetachedRunnerDetachesFromSSH(t *testing.T) {
+	b := NewBuilder(Config{Platform: PlatformMacOSArm64})
+	runner := b.detachedRunner("/tmp/jobs/envoy-abc123ef-macos-arm64")
+	// nohup must close stdin/stdout/stderr so SSH exits immediately instead
+	// of hanging waiting for the background process's file descriptors.
+	for _, want := range []string{
+		"nohup",
+		"</dev/null >/dev/null 2>&1 &",
+		"JOB_DIR:",
+		"exit_code",
+		"binary_path",
+	} {
+		if !strings.Contains(runner, want) {
+			t.Fatalf("detachedRunner() missing %q", want)
+		}
+	}
+}
+
 func writeFakeExecutable(t *testing.T, dir, name, body string) {
 	t.Helper()
 	path := filepath.Join(dir, name)
