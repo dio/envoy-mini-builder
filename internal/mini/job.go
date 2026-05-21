@@ -10,15 +10,16 @@ import (
 
 // Job holds the state of a detached remote build.
 type Job struct {
-	Tag       string    `json:"tag"`
-	Platform  string    `json:"platform"`
-	SSHHost   string    `json:"ssh_host"`
-	SSHPort   int       `json:"ssh_port"`
-	RemoteDir string    `json:"remote_dir"` // absolute path on the mini
-	GHRepo    string    `json:"gh_repo"`
-	Suffix    string    `json:"suffix"`
-	NoRelease bool      `json:"no_release"`
-	StartedAt time.Time `json:"started_at"`
+	Tag        string     `json:"tag"`
+	Platform   string     `json:"platform"`
+	SSHHost    string     `json:"ssh_host"`
+	SSHPort    int        `json:"ssh_port"`
+	RemoteDir  string     `json:"remote_dir"` // absolute path on the mini
+	GHRepo     string     `json:"gh_repo"`
+	Suffix     string     `json:"suffix"`
+	NoRelease  bool       `json:"no_release"`
+	StartedAt  time.Time  `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
 
 // JobsDir returns the directory where job state files are stored.

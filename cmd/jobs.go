@@ -43,7 +43,7 @@ func runJobs(cmd *cobra.Command, _ []string) error {
 		byTag[j.Tag] = append(byTag[j.Tag], j)
 	}
 
-	fmt.Printf("%-22s %-14s %-12s %s\n", "TAG", "PLATFORM", "STATUS", "STARTED")
+	fmt.Printf("%-22s %-14s %-12s %s\n", "TAG", "PLATFORM", "STATUS", "TIME")
 	for i, tag := range tagOrder {
 		if i > 0 {
 			fmt.Println()
@@ -54,13 +54,19 @@ func runJobs(cmd *cobra.Command, _ []string) error {
 			if err != nil {
 				status = "error"
 			}
+			// Record finish time on first done/failed detection.
+			if strings.HasPrefix(status, "done:") && j.FinishedAt == nil {
+				now := time.Now().UTC()
+				j.FinishedAt = &now
+				_ = mini.SaveJob(j)
+			}
 			display := formatStatus(status)
-			started := j.StartedAt.Local().Format("2006-01-02 15:04")
+			timeCol := formatJobTime(j)
 			tagCol := ""
 			if k == 0 {
 				tagCol = tag
 			}
-			fmt.Printf("%-22s %-14s %-12s %s\n", tagCol, j.Platform, display, started)
+			fmt.Printf("%-22s %-14s %-12s %s\n", tagCol, j.Platform, display, timeCol)
 		}
 	}
 	return nil
@@ -77,6 +83,24 @@ func formatStatus(status string) string {
 	default:
 		return "unknown"
 	}
+}
+
+func formatJobTime(j mini.Job) string {
+	if j.FinishedAt != nil {
+		dur := j.FinishedAt.Sub(j.StartedAt).Round(time.Minute)
+		return j.FinishedAt.Local().Format("2006-01-02 15:04") + " (took " + formatDur(dur) + ")"
+	}
+	elapsed := time.Since(j.StartedAt).Round(time.Minute)
+	return j.StartedAt.Local().Format("2006-01-02 15:04") + " (+" + formatDur(elapsed) + ")"
+}
+
+func formatDur(d time.Duration) string {
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh%dm", h, m)
+	}
+	return fmt.Sprintf("%dm", m)
 }
 
 // ── logs ──────────────────────────────────────────────────────────────────────
