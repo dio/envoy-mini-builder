@@ -3,10 +3,10 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
-	"github.com/dio/envoy-mini-builder/internal/github"
 	"github.com/dio/envoy-mini-builder/internal/mini"
 	"github.com/spf13/cobra"
 )
@@ -18,6 +18,7 @@ type buildFlags struct {
 	patchURL     string
 	releaseTag   string
 	noRelease    bool
+	downloadOnly bool
 	outDir       string
 	suffix       string
 	noStrip      bool
@@ -48,8 +49,17 @@ var buildCmd = &cobra.Command{
     --sha  a1b2c3d4 \
     --patch https://gist.githubusercontent.com/dio/.../my.patch
 
+  # Patched build: suffix distinguishes the asset name and lets you use
+  # a custom tag; the release body always records the patch URL.
+  envoy-mini-builder build --sha main --patch <url> --suffix=-patched \
+    --tag envoy-abcdef12-patched
+
   # Build only, no release
   envoy-mini-builder build --sha main --no-release --out ./dist
+
+  # Skip build — download existing assets for this SHA/tag
+  envoy-mini-builder build --sha main --download-only
+  envoy-mini-builder build --sha main --all-platforms --download-only
 
   # Add repeatable Bazel flags (use = when the value starts with -)
   envoy-mini-builder build --sha main --bazel-arg=--verbose_failures
@@ -77,19 +87,20 @@ func init() {
 	f.StringVar(&bf.envoyRepo, "repo", "envoyproxy/envoy", "Source repository (owner/repo); forks work")
 	f.StringVar(&bf.commitSHA, "sha", "", "Commit SHA, branch, or tag to build (required)")
 	f.StringVar(&bf.patchURL, "patch", "", "Raw URL to a .patch file applied before build")
-	f.StringVar(&bf.releaseTag, "tag", "", "Release tag (default: envoy-{sha8}-{date})")
+	f.StringVar(&bf.releaseTag, "tag", "", "Release tag (default: envoy-{sha8}); override for patch/variant builds, e.g. envoy-abcdef12-patched")
 	f.BoolVar(&bf.noRelease, "no-release", false, "Build only — skip release creation and upload")
+	f.BoolVar(&bf.downloadOnly, "download-only", false, "Skip build — download existing release assets for the resolved tag")
 	f.StringVar(&bf.outDir, "out", "./dist", "Local directory to save the downloaded binary")
-	f.StringVar(&bf.suffix, "suffix", "", "Suffix appended to the output binary name (e.g. -patched → envoy-macos-arm64-patched)")
+	f.StringVar(&bf.suffix, "suffix", "", "Suffix appended to binary and asset names (e.g. -patched → envoy-macos-arm64-patched)")
 	f.BoolVar(&bf.noStrip, "no-strip", false, "Skip post-build strip (useful for symbol analysis)")
 	f.StringVar(&bf.platform, "platform", string(mini.PlatformMacOSArm64), "Target platform: macos-arm64 | linux-arm64 | linux-amd64")
 	f.BoolVar(&bf.allPlatforms, "all-platforms", false, "Build for all supported platforms sequentially under one release")
 	f.StringVar(&bf.sshHost, "host", "dio@mini", "SSH host for the Mac mini")
 	f.IntVar(&bf.sshPort, "port", 22, "SSH port")
 	f.StringVar(&bf.bazelJobs, "jobs", "HOST_CPUS", "Bazel --jobs value")
-	f.StringArrayVar(&bf.bazelArgs, "bazel-arg", nil, "Additional Bazel argument appended to build and cquery; repeatable")
+	f.StringArrayVar(&bf.bazelArgs, "bazel-arg", nil, "Additional Bazel argument appended to build; repeatable; prefix platform: to scope (e.g. linux-arm64:--flag)")
 	f.StringVar(&bf.ghRepo, "gh-repo", "dio/envoy-builder", "GitHub repo for release assets (owner/repo)")
-	f.StringVar(&bf.bbKey, "bb-key", "", "BuildBuddy API key (applies to all platforms); per-platform env vars take precedence: BUILDBUDDY_API_KEY_MACOS_ARM64, BUILDBUDDY_API_KEY_LINUX_ARM64, BUILDBUDDY_API_KEY_LINUX_AMD64; fallback: BUILDBUDDY_API_KEY")
+	f.StringVar(&bf.bbKey, "bb-key", "", "BuildBuddy API key (all platforms); per-platform env vars: BUILDBUDDY_API_KEY_MACOS_ARM64, BUILDBUDDY_API_KEY_LINUX_ARM64, BUILDBUDDY_API_KEY_LINUX_AMD64; fallback: BUILDBUDDY_API_KEY")
 	_ = buildCmd.MarkFlagRequired("sha")
 
 	rootCmd.AddCommand(buildCmd)
@@ -117,7 +128,9 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 		platforms = []mini.Platform{plat}
 	}
 
-	// Derive release tag.
+	// Derive release tag: envoy-{sha8} by default — one canonical release per
+	// Envoy commit SHA. For patch/variant builds use --tag to override (e.g.
+	// --tag envoy-abcdef12-patched) and --suffix to distinguish asset names.
 	sha := bf.commitSHA
 	shortSHA := sha
 	if len(sha) > 8 {
@@ -125,13 +138,30 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 	}
 	tag := bf.releaseTag
 	if tag == "" {
-		tag = fmt.Sprintf("envoy-%s-%s", shortSHA, time.Now().UTC().Format("20060102"))
+		tag = fmt.Sprintf("envoy-%s", shortSHA)
 	}
 
-	// Validate gh token is available when we need it.
-	ghToken := os.Getenv("GITHUB_TOKEN")
-	if !bf.noRelease && ghToken == "" {
-		return fmt.Errorf("GITHUB_TOKEN env var required for release operations (or use --no-release)")
+	// ── Download-only shortcut ───────────────────────────────────────────────
+	if bf.downloadOnly {
+		if err := os.MkdirAll(bf.outDir, 0o755); err != nil {
+			return fmt.Errorf("create out dir: %w", err)
+		}
+		header("Download assets from %s @ %s", bf.ghRepo, tag)
+		for _, plat := range platforms {
+			platStr := string(plat)
+			pattern := fmt.Sprintf("envoy-%s%s", platStr, bf.suffix)
+			if err := ghRun("release", "download", tag,
+				"--repo", bf.ghRepo,
+				"--pattern", pattern,
+				"--dir", bf.outDir,
+				"--clobber",
+			); err != nil {
+				return fmt.Errorf("download [%s]: %w", platStr, err)
+			}
+			okf("Downloaded: %s/%s", strings.TrimRight(bf.outDir, "/"), pattern)
+		}
+		header("Done")
+		return nil
 	}
 
 	platNames := make([]string, len(platforms))
@@ -156,17 +186,13 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 	}
 
 	// ── Draft release (once) ─────────────────────────────────────────────────
-	var releaseID int64
 	if !bf.noRelease {
 		header("Create draft release")
-		gh := github.NewClient(ghToken)
 		body := releaseBody(bf.envoyRepo, sha, bf.patchURL, platNames)
-		id, err := gh.CreateDraftRelease(bf.ghRepo, tag, body)
-		if err != nil {
+		if err := ghCreateDraftRelease(bf.ghRepo, tag, body); err != nil {
 			return fmt.Errorf("create release: %w", err)
 		}
-		releaseID = id
-		okf("Draft release: %s (id=%d)", tag, releaseID)
+		okf("Draft release: %s", tag)
 	}
 
 	if err := os.MkdirAll(bf.outDir, 0o755); err != nil {
@@ -205,29 +231,27 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 
 		localPath := fmt.Sprintf("%s/envoy-%s%s", strings.TrimRight(bf.outDir, "/"), platStr, bf.suffix)
 		if err := bld.Run(cmd.Context(), localPath); err != nil {
-			if !bf.noRelease && releaseID != 0 {
-				gh := github.NewClient(ghToken)
-				_ = gh.MarkReleaseFailed(bf.ghRepo, releaseID, tag)
+			if !bf.noRelease {
+				_ = ghMarkReleaseFailed(bf.ghRepo, tag)
 			}
 			return fmt.Errorf("build failed [%s]: %w", platStr, err)
 		}
 		okf("Binary: %s", localPath)
 
 		if !bf.noRelease {
-			gh := github.NewClient(ghToken)
-			assetName := fmt.Sprintf("envoy-%s%s", platStr, bf.suffix)
-			if err := gh.UploadAsset(bf.ghRepo, releaseID, assetName, localPath); err != nil {
+			// gh release upload uses the file's basename as the asset name,
+			// which matches localPath's basename (envoy-<platform><suffix>).
+			if err := ghUploadAsset(bf.ghRepo, tag, localPath); err != nil {
 				return fmt.Errorf("upload asset [%s]: %w", platStr, err)
 			}
-			okf("Asset uploaded: %s", assetName)
+			okf("Asset uploaded: envoy-%s%s", platStr, bf.suffix)
 		}
 	}
 
 	// ── Publish release ──────────────────────────────────────────────────────
 	if !bf.noRelease {
 		header("Publish release")
-		gh := github.NewClient(ghToken)
-		if err := gh.PublishRelease(bf.ghRepo, releaseID); err != nil {
+		if err := ghPublishRelease(bf.ghRepo, tag); err != nil {
 			return fmt.Errorf("publish release: %w", err)
 		}
 		okf("Release published: https://github.com/%s/releases/tag/%s", bf.ghRepo, tag)
@@ -236,6 +260,48 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 	header("Done")
 	return nil
 }
+
+// ── gh CLI helpers ────────────────────────────────────────────────────────────
+
+func ghCreateDraftRelease(repo, tag, body string) error {
+	return ghRun("release", "create", tag,
+		"--repo", repo,
+		"--draft",
+		"--title", tag,
+		"--notes", body,
+	)
+}
+
+func ghUploadAsset(repo, tag, localPath string) error {
+	return ghRun("release", "upload", tag, localPath,
+		"--repo", repo,
+		"--clobber",
+	)
+}
+
+func ghPublishRelease(repo, tag string) error {
+	return ghRun("release", "edit", tag,
+		"--repo", repo,
+		"--draft=false",
+	)
+}
+
+func ghMarkReleaseFailed(repo, tag string) error {
+	return ghRun("release", "edit", tag,
+		"--repo", repo,
+		"--prerelease",
+		"--title", tag+" [FAILED]",
+	)
+}
+
+func ghRun(args ...string) error {
+	cmd := exec.Command("gh", args...)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// ── misc helpers ──────────────────────────────────────────────────────────────
 
 func releaseBody(repo, sha, patchURL string, platforms []string) string {
 	patch := "—"

@@ -5,6 +5,16 @@ Build Envoy on a remote Mac mini and publish the binary as a GitHub release asse
 SSHes to your Mac mini, runs a Bazel build, streams logs live, downloads the
 result via SFTP, and publishes it to a GitHub release — all from a single command.
 
+## Requirements
+
+- **`ssh`** and **`scp`** (standard on macOS)
+- **[`gh`](https://cli.github.com/)** — GitHub CLI, authenticated (`gh auth login`); used for release operations
+
+```sh
+brew install gh
+gh auth login
+```
+
 ## Install
 
 ```sh
@@ -26,29 +36,36 @@ envoy-mini-builder build --sha <ref> [flags]
 | `--sha` | *(required)* | Commit SHA, branch, or tag |
 | `--repo` | `envoyproxy/envoy` | Source repo (`owner/repo`); forks work |
 | `--patch` | | Raw URL to a `.patch` file applied before build |
-| `--tag` | `envoy-{sha8}-{date}` | Override release tag |
+| `--tag` | `envoy-{sha8}` | Override release tag; e.g. `envoy-abcdef12-patched` for variants |
 | `--no-release` | `false` | Build only, skip release create/upload |
 | `--out` | `./dist` | Local directory for the downloaded binary |
-| `--suffix` | | Suffix appended to binary name (e.g. `-patched`) |
-| `--no-strip` | `false` | Skip post-build strip (useful for symbol analysis) |
+| `--suffix` | | Suffix appended to binary/asset name (e.g. `-patched`) |
+| `--no-strip` | `false` | Skip post-build `strip -x` (useful for symbol analysis) |
+| `--platform` | `macos-arm64` | Target platform: `macos-arm64` \| `linux-arm64` \| `linux-amd64` |
+| `--all-platforms` | `false` | Build all supported platforms sequentially under one release |
 | `--host` | `dio@mini` | SSH host of the Mac mini |
 | `--port` | `22` | SSH port |
 | `--jobs` | `HOST_CPUS` | Bazel `--jobs` value |
+| `--bazel-arg` | | Extra Bazel flag; repeatable; prefix `platform:` to scope |
 | `--gh-repo` | `dio/envoy-builder` | GitHub repo for release assets |
-| `--bb-key` | `$BUILDBUDDY_API_KEY` | BuildBuddy API key (remote cache) |
+| `--bb-key` | | BuildBuddy API key (all platforms); see env vars below |
 
 ### Examples
 
 ```sh
 # Minimal: build main, publish to dio/envoy-builder
-GITHUB_TOKEN=$(gh auth token) envoy-mini-builder build --sha main
+envoy-mini-builder build --sha main
+
+# Build all platforms under one release tag
+envoy-mini-builder build --sha main --all-platforms
 
 # Fork + patch + custom tag
 envoy-mini-builder build \
-  --repo  your-org/envoy \
-  --sha   a1b2c3d4 \
-  --patch https://gist.githubusercontent.com/dio/.../my.patch \
-  --tag   envoy-my-fix-20260519
+  --repo   your-org/envoy \
+  --sha    a1b2c3d4 \
+  --patch  https://gist.githubusercontent.com/dio/.../my.patch \
+  --suffix -patched \
+  --tag    envoy-a1b2c3d4-patched
 
 # Build only, no release
 envoy-mini-builder build --sha main --no-release --out ./dist
@@ -61,8 +78,12 @@ envoy-mini-builder build --sha main --host user@192.168.1.10 --port 2222
 
 | Variable | Description |
 |----------|-------------|
-| `GITHUB_TOKEN` | Required for release operations (skip with `--no-release`) |
-| `BUILDBUDDY_API_KEY` | BuildBuddy API key for remote cache on mini |
+| `BUILDBUDDY_API_KEY_MACOS_ARM64` | BuildBuddy key for macOS arm64 builds |
+| `BUILDBUDDY_API_KEY_LINUX_ARM64` | BuildBuddy key for Linux arm64 builds |
+| `BUILDBUDDY_API_KEY_LINUX_AMD64` | BuildBuddy key for Linux amd64 builds |
+| `BUILDBUDDY_API_KEY` | Fallback BuildBuddy key (used when platform-specific var is unset) |
+
+GitHub auth is handled by `gh` — run `gh auth login` once. No `GITHUB_TOKEN` needed.
 
 ## Dynamic module symbol export (macOS)
 
@@ -111,30 +132,57 @@ with `_` in `-exported_symbol` patterns.
 
 ## Auth
 
-The CLI authenticates to the Mac mini using your local **ssh-agent** (checked
-first) or `~/.ssh/id_ed25519` / `~/.ssh/id_rsa` / `~/.ssh/id_ecdsa` as fallbacks.
-No passwords. No key copying. Your agent handles it.
+**Mac mini** — uses your local **ssh-agent** or `~/.ssh/id_{ed25519,rsa,ecdsa}`.
+No passwords. No key copying.
 
-`GITHUB_TOKEN` is only needed locally to create/publish the GitHub release.
-It is never forwarded to the mini.
+**GitHub** — uses `gh` CLI. Run `gh auth login` once; the token is never
+forwarded to the mini.
 
-`BUILDBUDDY_API_KEY` is forwarded to the mini as a process environment variable
-(via the script prologue piped to `bash -s` stdin). During the build it is
-written to `.bazelrc.cache` in the workspace so Bazel can read it; a `trap`
-deletes that file on script exit regardless of success or failure. It is never
-written to the shell history or any persistent config file on mini.
+**BuildBuddy** — the API key is forwarded to the mini as a process environment
+variable via the script prologue. During the build it is written to
+`.bazelrc.cache` outside the workspace; a `trap` deletes it on exit regardless
+of success or failure. Never written to shell history or any persistent config.
 
 ## How it works
 
-1. Creates a **draft** GitHub release
+1. Creates a **draft** GitHub release via `gh release create`
 2. SSHes to the mini, pipes the build script to `bash -s`
 3. Streams all build logs to your terminal in real-time
 4. Remote script emits a `BINARY_PATH:…` sentinel on stdout
-5. Downloads the binary over **SFTP** (same SSH connection, no extra auth)
-6. Uploads the binary as a release asset
-7. Publishes the release
+5. Downloads the binary via `scp`
+6. Uploads the binary as a release asset via `gh release upload`
+7. Publishes the release via `gh release edit --draft=false`
 
 On failure the draft is marked `[FAILED]` as a prerelease so you don't lose partial work.
+
+## Tag and variant scheme
+
+| Scenario | `--sha` | `--tag` | `--suffix` | Asset name |
+|----------|---------|---------|------------|------------|
+| Clean build | `abc123ef` | *(auto: `envoy-abc123ef`)* | | `envoy-macos-arm64` |
+| With patch | `abc123ef` | `envoy-abc123ef-patched` | `-patched` | `envoy-macos-arm64-patched` |
+| Custom Bazel flags | `abc123ef` | `envoy-abc123ef-custom` | `-custom` | `envoy-macos-arm64-custom` |
+| All platforms | `abc123ef` | *(auto)* | | `envoy-{platform}` |
+
+The default tag `envoy-{sha8}` gives one canonical release per Envoy commit.
+Use `--tag` + `--suffix` together for patch/variant builds to keep both the
+release and the asset names unambiguous.
+
+### Re-downloading without rebuilding
+
+If the release already exists, skip the build entirely:
+
+```sh
+# Single platform
+envoy-mini-builder build --sha abc123ef --download-only
+
+# All platforms
+envoy-mini-builder build --sha abc123ef --all-platforms --download-only
+
+# Patched variant (must match --tag and --suffix used at build time)
+envoy-mini-builder build --sha abc123ef \
+  --tag envoy-abc123ef-patched --suffix=-patched --download-only
+```
 
 The mini keeps its workspace at `~/envoy-builder/{repo}/src/` between runs.
 Bazel's local disk cache accumulates there, cutting subsequent builds significantly.
