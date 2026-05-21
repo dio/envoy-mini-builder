@@ -148,13 +148,19 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 		platforms = []mini.Platform{plat}
 	}
 
-	// Derive release tag: envoy-{sha8} by default — one canonical release per
-	// Envoy commit SHA. For patch/variant builds use --tag + --suffix.
+	// Resolve the ref to a full commit SHA so the tag is always pinned to an
+	// immutable commit, even when the user passes a branch name like "main".
 	sha := bf.commitSHA
-	shortSHA := sha
-	if len(sha) > 8 {
-		shortSHA = sha[:8]
+	infof("resolving %s/%s ...", bf.envoyRepo, sha)
+	resolved, err := resolveRef(bf.envoyRepo, sha)
+	if err != nil {
+		return fmt.Errorf("resolve ref: %w", err)
 	}
+	if resolved != sha {
+		infof("resolved:  %s → %s", sha, resolved)
+		sha = resolved
+	}
+	shortSHA := sha[:8]
 	tag := bf.releaseTag
 	if tag == "" {
 		tag = fmt.Sprintf("envoy-%s", shortSHA)
@@ -488,4 +494,38 @@ func okf(format string, args ...any) {
 
 func warnf(format string, args ...any) {
 	fmt.Printf("\033[33m⚠\033[0m  "+format+"\n", args...)
+}
+
+// resolveRef resolves a branch name, tag, or short SHA to the full 40-char
+// commit SHA via the GitHub API. If ref is already a full 40-char hex SHA it
+// is returned unchanged without a network call.
+func resolveRef(repo, ref string) (string, error) {
+	if isFullSHA(ref) {
+		return ref, nil
+	}
+	cmd := exec.Command("gh", "api",
+		fmt.Sprintf("repos/%s/commits/%s", repo, ref),
+		"--jq", ".sha",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("resolve ref %q in %s: %w", ref, repo, err)
+	}
+	full := strings.TrimSpace(string(out))
+	if !isFullSHA(full) {
+		return "", fmt.Errorf("unexpected SHA from GitHub API: %q", full)
+	}
+	return full, nil
+}
+
+func isFullSHA(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
