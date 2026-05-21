@@ -168,12 +168,28 @@ func (b *Builder) ReadBinaryPath(ctx context.Context, remoteDir string) (string,
 	return strings.TrimSpace(string(out)), nil
 }
 
-// CancelJob kills the background build process and removes the remote job dir.
-// It is a best-effort operation: errors from kill or rm are returned but the
-// caller should still remove local job state regardless.
+// CancelJob kills the background build process, shuts down the Bazel server
+// (so it releases the lock), and removes the remote job dir.
+// It is a best-effort operation: the caller should remove local job state regardless.
 func (b *Builder) CancelJob(ctx context.Context, remoteDir string) error {
 	pidFile := jobPath(remoteDir + "/pid")
-	remoteCmd := `pid=$(cat ` + pidFile + ` 2>/dev/null); [ -n "$pid" ] && kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null; rm -rf ` + jobPath(remoteDir)
+	plat := b.cfg.Platform.resolved()
+
+	// Determine how to reach the Bazel server: Linux builds run inside an
+	// OrbStack VM; macOS builds run directly on the mini.
+	var bazelShutdown string
+	if plat.IsLinux() {
+		machine := shellQuote(string(plat))
+		bazelShutdown = `PATH=/opt/homebrew/bin:$PATH orb run -m ` + machine + ` bash -c 'pkill -x bazel 2>/dev/null; pkill -x bazelisk 2>/dev/null; true'`
+	} else {
+		bazelShutdown = `pkill -x bazel 2>/dev/null; pkill -x bazelisk 2>/dev/null; true`
+	}
+
+	remoteCmd := `pid=$(cat ` + pidFile + ` 2>/dev/null)
+[ -n "$pid" ] && kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null
+` + bazelShutdown + `
+rm -rf ` + jobPath(remoteDir)
+
 	_, err := b.sshOutput(ctx, remoteCmd)
 	return err
 }
