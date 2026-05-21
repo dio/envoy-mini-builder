@@ -277,6 +277,7 @@ echo "→ bazel build starting (--jobs=${BAZEL_JOBS})..."
 bazel \
   ${BAZEL_CACHE_ARGS[@]+"${BAZEL_CACHE_ARGS[@]}"} \
   build \
+  --config=linux \
   --compilation_mode=opt \
   --curses=no \
   --verbose_failures \
