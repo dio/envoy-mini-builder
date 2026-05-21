@@ -167,9 +167,9 @@ if ! command -v bazel &>/dev/null && ! command -v bazelisk &>/dev/null; then
   sudo apt-get install -y -qq curl ca-certificates
   curl -fsSL \
     "https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-${ARCH}" \
-    -o /usr/local/bin/bazelisk
-  chmod +x /usr/local/bin/bazelisk
-  ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
+    -o /tmp/bazelisk
+  sudo install -m 0755 /tmp/bazelisk /usr/local/bin/bazelisk
+  sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
 fi
 echo "→ bazel: $(bazel version 2>&1 | grep -E 'Bazelisk version|Build label' | head -1)"
 
