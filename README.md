@@ -2,18 +2,19 @@
 
 Build Envoy on a remote Mac mini and publish the binary as a GitHub release asset.
 
-SSHes to your Mac mini, runs a Bazel build, streams logs live, downloads the
-result via SFTP, and publishes it to a GitHub release — all from a single command.
+SSHes to your Mac mini, runs a Bazel build, streams logs live, downloads the result via `scp`, and publishes it to a GitHub release — all from a single command. Linux builds run inside OrbStack VMs on the mini.
 
 ## Requirements
 
-- **`ssh`** and **`scp`** (standard on macOS)
-- **[`gh`](https://cli.github.com/)** — GitHub CLI, authenticated (`gh auth login`); used for release operations
+- **`ssh`** and **`scp`** (standard on macOS/Linux)
+- **[`gh`](https://cli.github.com/)** — GitHub CLI, authenticated
 
 ```sh
 brew install gh
 gh auth login
 ```
+
+- **[OrbStack](https://orbstack.dev/)** on the Mac mini — required for Linux builds; macOS builds run natively
 
 ## Install
 
@@ -36,20 +37,21 @@ envoy-mini-builder build --sha <ref> [flags]
 | `--sha` | *(required)* | Commit SHA, branch, or tag |
 | `--repo` | `envoyproxy/envoy` | Source repo (`owner/repo`); forks work |
 | `--patch` | | Raw URL to a `.patch` file applied before build |
-| `--tag` | `envoy-{sha8}` | Override release tag; e.g. `envoy-abcdef12-patched` for variants |
+| `--tag` | `envoy-{sha8}` | Override release tag; required for variant builds |
 | `--no-release` | `false` | Build only, skip release create/upload |
-| `--force-build` | `false` | Always rebuild even if the asset already exists in the release |
+| `--force-build` | `false` | Always rebuild even if the asset already exists |
 | `--out` | `./dist` | Local directory for the downloaded binary |
 | `--suffix` | | Suffix appended to binary/asset name (e.g. `-patched`) |
-| `--no-strip` | `false` | Skip post-build `strip -x` (useful for symbol analysis) |
-| `--platform` | `macos-arm64` | Target platform: `macos-arm64` \| `linux-arm64` \| `linux-amd64` |
-| `--all-platforms` | `false` | Build all supported platforms sequentially under one release |
+| `--no-strip` | `false` | Skip post-build `strip -x` |
+| `--platform` | `macos-arm64` | Target: `macos-arm64` \| `linux-arm64` \| `linux-amd64` |
+| `--all-platforms` | `false` | Build all supported platforms under one release |
 | `--host` | `dio@mini` | SSH host of the Mac mini |
 | `--port` | `22` | SSH port |
 | `--jobs` | `HOST_CPUS` | Bazel `--jobs` value |
-| `--bazel-arg` | | Extra Bazel flag; repeatable; prefix `platform:` to scope |
+| `--bazel-arg` | | Extra Bazel flag; repeatable; prefix `platform:` to scope (e.g. `linux-arm64:--flag`) |
 | `--gh-repo` | `dio/envoy-builder` | GitHub repo for release assets |
-| `--bb-key` | | BuildBuddy API key (all platforms); see env vars below |
+| `--bb-key` | | BuildBuddy API key; see env vars below |
+| `--detach` | `false` | Start build in background on the mini; use `jobs`/`logs`/`fetch` to manage |
 
 ### Examples
 
@@ -57,14 +59,19 @@ envoy-mini-builder build --sha <ref> [flags]
 # Minimal: build main, publish to dio/envoy-builder
 envoy-mini-builder build --sha main
 
-# Build all platforms under one release tag
+# All platforms under one release tag
 envoy-mini-builder build --sha main --all-platforms
+
+# Detached: start builds in background, check later
+envoy-mini-builder build --sha main --all-platforms --detach
+envoy-mini-builder jobs
+envoy-mini-builder fetch envoy-abc123ef
 
 # Fork + patch + custom tag
 envoy-mini-builder build \
   --repo   your-org/envoy \
   --sha    a1b2c3d4 \
-  --patch  https://gist.githubusercontent.com/dio/.../my.patch \
+  --patch  https://raw.githubusercontent.com/.../my.patch \
   --suffix -patched \
   --tag    envoy-a1b2c3d4-patched
 
@@ -82,121 +89,57 @@ envoy-mini-builder build --sha main --host user@192.168.1.10 --port 2222
 | `BUILDBUDDY_API_KEY_MACOS_ARM64` | BuildBuddy key for macOS arm64 builds |
 | `BUILDBUDDY_API_KEY_LINUX_ARM64` | BuildBuddy key for Linux arm64 builds |
 | `BUILDBUDDY_API_KEY_LINUX_AMD64` | BuildBuddy key for Linux amd64 builds |
-| `BUILDBUDDY_API_KEY` | Fallback BuildBuddy key (used when platform-specific var is unset) |
+| `BUILDBUDDY_API_KEY` | Fallback key used when no platform-specific var is set |
 
-GitHub auth is handled by `gh` — run `gh auth login` once. No `GITHUB_TOKEN` needed.
+## Detached builds
 
-## Dynamic module symbol export (macOS)
-
-On macOS, Envoy is compiled with `-fvisibility=hidden`. Strong `extern "C"` callback
-functions are NOT placed in the Mach-O export trie, so `strip` removes them and
-`dlsym` cannot resolve them at runtime. This is a macOS-specific issue — on Linux,
-`-rdynamic` exports all global symbols automatically.
-
-Two fixes are available:
-
-### Fix 2 — visibility patch (preferred)
-
-Apply a source patch that adds `#pragma GCC visibility push(default)` around the
-two `extern "C"` blocks that define `envoy_dynamic_module_callback_*` symbols:
+`--detach` starts the build in the background on the mini and returns immediately.
 
 ```sh
-go run . build \
-  --sha  $SHA \
-  --repo envoyproxy/envoy \
-  --patch https://gist.github.com/dio/c642501419c3513a7d6e992c8b146f93/raw/dynamic-module-export-fix.patch \
-  --no-release --out ./dist
+# Start
+envoy-mini-builder build --sha main --all-platforms --detach
+
+# Check status
+envoy-mini-builder jobs
+
+# Tail logs for a specific platform
+envoy-mini-builder logs envoy-abc123ef --platform linux-arm64
+
+# Download and publish once done
+envoy-mini-builder fetch envoy-abc123ef
+
+# Cancel and clean up
+envoy-mini-builder cancel envoy-abc123ef
 ```
 
-The patch targets:
-- `source/extensions/dynamic_modules/abi_impl.cc`
-- `source/extensions/filters/http/dynamic_modules/abi_impl.cc`
+`fetch` creates the GitHub release, uploads binaries, and publishes it — then removes local job state.
 
-This produces a `Clean` version string (patch is applied before build, workspace
-`.bazelrc` is never touched).
+## Download-or-build
 
-### Fix 1 — linker exported-symbol wildcard (no source changes)
+For each platform the CLI first checks the release for an existing asset. If found it is downloaded; its `.params.json` sidecar is verified to match current build params. Only missing or mismatched assets trigger a remote build. Use `--force-build` to always rebuild.
 
-Pass a linker flag via `--bazel-arg` to force all matching symbols into the export
-trie at link time, without modifying source:
-
-```sh
-go run . build \
-  --sha  $SHA \
-  --repo envoyproxy/envoy \
-  "--bazel-arg=--linkopt=-Wl,-exported_symbol,_envoy_dynamic_module_callback_*" \
-  --no-release --out ./dist
-```
-
-Note the leading underscore: macOS linker requires C symbol names to be prefixed
-with `_` in `-exported_symbol` patterns.
-
-## Auth
-
-**Mac mini** — uses your local **ssh-agent** or `~/.ssh/id_{ed25519,rsa,ecdsa}`.
-No passwords. No key copying.
-
-**GitHub** — uses `gh` CLI. Run `gh auth login` once; the token is never
-forwarded to the mini.
-
-**BuildBuddy** — the API key is forwarded to the mini as a process environment
-variable via the script prologue. During the build it is written to
-`.bazelrc.cache` outside the workspace; a `trap` deletes it on exit regardless
-of success or failure. Never written to shell history or any persistent config.
+The auto tag `envoy-{sha8}` is reserved for default-param builds (`envoyproxy/envoy`, no patch, no extra Bazel args, no `--no-strip`). Variant builds must supply `--tag` explicitly — the CLI errors otherwise.
 
 ## How it works
 
-1. Creates a **draft** GitHub release via `gh release create`
-2. SSHes to the mini, pipes the build script to `bash -s`
-3. Streams all build logs to your terminal in real-time
-4. Remote script emits a `BINARY_PATH:…` sentinel on stdout
-5. Downloads the binary via `scp`
-6. Uploads the binary as a release asset via `gh release upload`
-7. Publishes the release via `gh release edit --draft=false`
+**macOS builds**
 
-On failure the draft is marked `[FAILED]` as a prerelease so you don't lose partial work.
+1. SSH to the mini, pipe the build script to `bash -s`
+2. Stream build logs live; capture `BINARY_PATH:…` sentinel from stdout
+3. Download the binary via `scp`
+4. Upload to GitHub release via `gh`
 
-## Tag and variant scheme
+**Linux builds**
 
-| Scenario | `--sha` | `--tag` | `--suffix` | Asset name |
-|----------|---------|---------|------------|------------|
-| Clean build | `main` | *(auto: `envoy-abc123ef`)* | | `envoy-macos-arm64` |
-| With patch | `main` | `envoy-abc123ef-patched` | `-patched` | `envoy-macos-arm64-patched` |
-| Custom Bazel flags | `main` | `envoy-abc123ef-custom` | `-custom` | `envoy-macos-arm64-custom` |
-| All platforms | `main` | *(auto)* | | `envoy-{platform}` |
+Same, but the build script runs inside an OrbStack VM via `orb run -m <machine>`. The binary lives inside the VM, so after the build it is staged on the Mac mini host with `orb cp` before the `scp` download.
 
-Branch names and tags are automatically resolved to the full commit SHA before
-the release tag is derived, so `--sha main` always produces a pinned tag like
-`envoy-abc123ef` rather than the ambiguous `envoy-main`.
+## Auth
 
-The auto tag `envoy-{sha8}` is **reserved for default-param builds only**
-(`envoyproxy/envoy`, no patch, no extra Bazel args, no `--no-strip`).
-Any variant must supply `--tag` explicitly — the CLI errors if you use
-non-default params without one, preventing silent collisions with the
-canonical release for that SHA.
+**Mac mini** — uses your local ssh-agent or `~/.ssh/id_{ed25519,rsa,ecdsa}`. No passwords.
 
-> **Caveat:** two runs with different `--tag` values but the same asset name
-> can still collide if `--force-build` is used. A `.params.json` sidecar is
-> uploaded alongside every binary; the CLI compares it on subsequent runs and
-> warns before overwriting.
+**GitHub** — uses `gh` CLI. Run `gh auth login` once; the token is never forwarded to the mini.
 
-### Default: download if exists, build if not
-
-For each platform the CLI first checks the release for an existing asset.
-If found, it is downloaded (and its `.params.json` verified to match current
-params). Only missing or mismatched assets trigger a remote build.
-Use `--force-build` to always rebuild:
-
-```sh
-# Downloads existing asset if found, otherwise builds
-envoy-mini-builder build --sha abc123ef
-
-# Force rebuild even if the asset is already published (warns if params differ)
-envoy-mini-builder build --sha abc123ef --force-build
-```
-
-The mini keeps its workspace at `~/envoy-builder/{repo}/src/` between runs.
-Bazel's local disk cache accumulates there, cutting subsequent builds significantly.
+**BuildBuddy** — the API key is forwarded to the mini as a process environment variable, written to `.bazelrc.cache` outside the workspace, and deleted on script exit via `trap`. Never written to shell history or any persistent config.
 
 ## Building from source
 
@@ -205,19 +148,6 @@ git clone https://github.com/dio/envoy-mini-builder
 cd envoy-mini-builder
 go build -o envoy-mini-builder .
 ```
-
-## Releases
-
-goreleaser publishes binaries for:
-
-| OS | Arch |
-|----|------|
-| macOS | arm64 |
-| Linux | amd64 |
-| Linux | arm64 |
-
-The Homebrew formula in [dio/homebrew-tap](https://github.com/dio/homebrew-tap)
-is updated automatically on each release.
 
 ## License
 
