@@ -38,10 +38,12 @@ type buildFlags struct {
 var bf buildFlags
 
 var buildCmd = &cobra.Command{
-	Use:   "build",
+	Use:   "build [envoy-<sha>]",
 	Short: "Build Envoy on the Mac mini and publish a release asset",
+	Args:  cobra.MaximumNArgs(1),
 	Example: `  # Minimal — downloads existing asset if the release exists, otherwise builds
   envoy-mini-builder build --sha main
+  envoy-mini-builder build envoy-abcdef12
 
   # Build all platforms (downloads any that already exist, builds the rest)
   envoy-mini-builder build --sha main --all-platforms
@@ -64,7 +66,7 @@ var buildCmd = &cobra.Command{
   #   1. Single key via flag (applies to every platform):
   envoy-mini-builder build --sha main --bb-key <key>
   #   2. Per-platform env vars (different keys per BB org/project):
-  export BUILDBUDDY_API_KEY_MACOS_ARM64=<mac-key>
+  export BUILDBUDDY_API_KEY_DARWIN_ARM64=<mac-key>
   export BUILDBUDDY_API_KEY_LINUX_ARM64=<linux-arm-key>
   export BUILDBUDDY_API_KEY_LINUX_AMD64=<linux-amd-key>
   envoy-mini-builder build --sha main --all-platforms
@@ -77,7 +79,7 @@ var buildCmd = &cobra.Command{
 func init() {
 	f := buildCmd.Flags()
 	f.StringVar(&bf.envoyRepo, "repo", "envoyproxy/envoy", "Source repository (owner/repo); forks work")
-	f.StringVar(&bf.commitSHA, "sha", "", "Commit SHA, branch, or tag to build (required)")
+	f.StringVar(&bf.commitSHA, "sha", "", "Commit SHA, branch, or tag to build (or pass envoy-<sha> as positional arg)")
 	f.StringVar(&bf.patchURL, "patch", "", "Raw URL to a .patch file applied before build")
 	f.StringVar(&bf.releaseTag, "tag", "", "Release tag (default: envoy-{sha8}); override for patch/variant builds, e.g. envoy-abcdef12-patched")
 	f.BoolVar(&bf.noRelease, "no-release", false, "Build only — skip release creation and upload")
@@ -94,7 +96,6 @@ func init() {
 	f.StringVar(&bf.ghRepo, "gh-repo", "dio/envoy-builder", "GitHub repo for release assets (owner/repo)")
 	f.StringVar(&bf.bbKey, "bb-key", "", "BuildBuddy API key (all platforms); per-platform env vars: BUILDBUDDY_API_KEY_DARWIN_ARM64, BUILDBUDDY_API_KEY_LINUX_ARM64, BUILDBUDDY_API_KEY_LINUX_AMD64; fallback: BUILDBUDDY_API_KEY")
 	f.BoolVar(&bf.detach, "detach", false, "Detach after starting — build runs in background on the mini; use 'jobs', 'logs', 'fetch' to manage")
-	_ = buildCmd.MarkFlagRequired("sha")
 
 	rootCmd.AddCommand(buildCmd)
 }
@@ -133,7 +134,18 @@ func (p buildParams) String() string {
 	return string(b)
 }
 
-func runBuild(cmd *cobra.Command, _ []string) error {
+func runBuild(cmd *cobra.Command, args []string) error {
+	// Resolve SHA: --sha flag takes precedence; positional envoy-<sha> strips prefix.
+	if len(args) == 1 {
+		if bf.commitSHA != "" {
+			return fmt.Errorf("specify the SHA via --sha or as a positional argument, not both")
+		}
+		bf.commitSHA = strings.TrimPrefix(args[0], "envoy-")
+	}
+	if bf.commitSHA == "" {
+		return fmt.Errorf("SHA is required: use --sha <ref> or pass envoy-<sha> as a positional argument")
+	}
+
 	// Determine platform list.
 	var platforms []mini.Platform
 	if bf.allPlatforms {
