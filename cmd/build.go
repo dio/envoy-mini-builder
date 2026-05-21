@@ -163,7 +163,7 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 	shortSHA := sha[:8]
 	tag := bf.releaseTag
 	if tag == "" {
-		tag = fmt.Sprintf("envoy@%s", shortSHA)
+		tag = fmt.Sprintf("envoy-%s", shortSHA)
 		// The auto tag is reserved for default-param builds only.
 		// Any variant (patch, extra bazel args, no-strip, fork) must
 		// carry an explicit --tag so it never silently collides with
@@ -175,8 +175,8 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 		if isVariant {
 			return fmt.Errorf(
 				"non-default build params require an explicit --tag.\n"+
-					"  Suggested: --tag envoy@%s-<variant>\n"+
-					"  (keeps the canonical envoy@%s release for default params)",
+					"  Suggested: --tag envoy-%s-<variant>\n"+
+					"  (keeps the canonical envoy-%s release for default params)",
 				shortSHA, shortSHA)
 		}
 	}

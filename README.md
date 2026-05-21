@@ -160,16 +160,16 @@ On failure the draft is marked `[FAILED]` as a prerelease so you don't lose part
 
 | Scenario | `--sha` | `--tag` | `--suffix` | Asset name |
 |----------|---------|---------|------------|------------|
-| Clean build | `main` | *(auto: `envoy@abc123ef`)* | | `envoy-macos-arm64` |
-| With patch | `main` | `envoy@abc123ef-patched` | `-patched` | `envoy-macos-arm64-patched` |
-| Custom Bazel flags | `main` | `envoy@abc123ef-custom` | `-custom` | `envoy-macos-arm64-custom` |
+| Clean build | `main` | *(auto: `envoy-abc123ef`)* | | `envoy-macos-arm64` |
+| With patch | `main` | `envoy-abc123ef-patched` | `-patched` | `envoy-macos-arm64-patched` |
+| Custom Bazel flags | `main` | `envoy-abc123ef-custom` | `-custom` | `envoy-macos-arm64-custom` |
 | All platforms | `main` | *(auto)* | | `envoy-{platform}` |
 
 Branch names and tags are automatically resolved to the full commit SHA before
 the release tag is derived, so `--sha main` always produces a pinned tag like
-`envoy@abc123ef` rather than the ambiguous `envoy-main`.
+`envoy-abc123ef` rather than the ambiguous `envoy-main`.
 
-The auto tag `envoy@{sha8}` is **reserved for default-param builds only**
+The auto tag `envoy-{sha8}` is **reserved for default-param builds only**
 (`envoyproxy/envoy`, no patch, no extra Bazel args, no `--no-strip`).
 Any variant must supply `--tag` explicitly — the CLI errors if you use
 non-default params without one, preventing silent collisions with the
