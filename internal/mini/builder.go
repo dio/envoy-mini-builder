@@ -220,7 +220,7 @@ func (b *Builder) sshOutput(ctx context.Context, remoteCmd string) ([]byte, erro
 type Platform string
 
 const (
-	PlatformMacOSArm64 Platform = "macos-arm64"
+	PlatformDarwinArm64 Platform = "darwin-arm64"
 	PlatformLinuxArm64 Platform = "linux-arm64"
 	PlatformLinuxAmd64 Platform = "linux-amd64"
 )
@@ -230,10 +230,10 @@ func (p Platform) IsLinux() bool {
 	return p == PlatformLinuxArm64 || p == PlatformLinuxAmd64
 }
 
-// resolved returns the platform, defaulting to PlatformMacOSArm64 if zero.
+// resolved returns the platform, defaulting to PlatformDarwinArm64 if zero.
 func (p Platform) resolved() Platform {
 	if p == "" {
-		return PlatformMacOSArm64
+		return PlatformDarwinArm64
 	}
 	return p
 }
@@ -249,7 +249,7 @@ type Config struct {
 	BazelArgs []string
 	BBKey     string   // BuildBuddy API key for current platform; empty = local cache only
 	NoStrip   bool     // skip post-build strip (useful for symbol analysis)
-	Platform  Platform // target platform; defaults to PlatformMacOSArm64 if zero
+	Platform  Platform // target platform; defaults to PlatformDarwinArm64 if zero
 }
 
 // Builder executes a remote Envoy build and downloads the result.
@@ -392,21 +392,45 @@ func (b *Builder) scpDownloadViaOrb(ctx context.Context, vmPath, localPath strin
 	machine := string(b.cfg.Platform.resolved())
 	remoteCmd := `PATH=/opt/homebrew/bin:$PATH orb run -m ` + shellQuote(machine) + ` cat ` + shellQuote(vmPath)
 
+	f, err := os.OpenFile(localPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return fmt.Errorf("open output file: %w", err)
+	}
+	defer f.Close()
+
+	pw := &downloadProgress{w: f}
 	args := b.sshArgs(remoteCmd)
 	cmd := exec.CommandContext(ctx, "ssh", args...)
-	data, err := cmd.Output()
-	if err != nil {
+	cmd.Stdout = pw
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("stream binary from VM: %w", err)
 	}
-	if err := os.WriteFile(localPath, data, 0o755); err != nil {
-		return fmt.Errorf("write binary: %w", err)
-	}
-	info, err := os.Stat(localPath)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("\033[32m✓\033[0m Downloaded %d bytes → %s\n", info.Size(), localPath)
+	pw.finish()
+	fmt.Printf("\033[32m✓\033[0m Downloaded %d bytes → %s\n", pw.total, localPath)
 	return nil
+}
+
+type downloadProgress struct {
+	w      io.Writer
+	total  int64
+	lastMB int64
+}
+
+func (d *downloadProgress) Write(p []byte) (int, error) {
+	n, err := d.w.Write(p)
+	d.total += int64(n)
+	if mb := d.total / (1024 * 1024); mb > d.lastMB {
+		fmt.Fprintf(os.Stderr, "\r\033[36m▶\033[0m downloading… %d MB", mb)
+		d.lastMB = mb
+	}
+	return n, err
+}
+
+func (d *downloadProgress) finish() {
+	if d.lastMB > 0 {
+		fmt.Fprintln(os.Stderr)
+	}
 }
 
 func (b *Builder) scpDownloadDirect(ctx context.Context, remotePath, localPath string) error {
@@ -493,7 +517,7 @@ func (b *Builder) filteredBazelArgs() []string {
 	for _, arg := range b.cfg.BazelArgs {
 		if i := strings.Index(arg, ":"); i >= 0 {
 			switch Platform(arg[:i]) {
-			case PlatformMacOSArm64, PlatformLinuxArm64, PlatformLinuxAmd64:
+			case PlatformDarwinArm64, PlatformLinuxArm64, PlatformLinuxAmd64:
 				if Platform(arg[:i]) == plat {
 					out = append(out, arg[i+1:])
 				}

@@ -290,8 +290,8 @@ func TestSplitLinesAndCarriageReturns(t *testing.T) {
 }
 
 func TestPlatformIsLinux(t *testing.T) {
-	if PlatformMacOSArm64.IsLinux() {
-		t.Fatal("macos-arm64 reported as Linux")
+	if PlatformDarwinArm64.IsLinux() {
+		t.Fatal("darwin-arm64 reported as Linux")
 	}
 	if !PlatformLinuxArm64.IsLinux() {
 		t.Fatal("linux-arm64 not reported as Linux")
@@ -310,7 +310,7 @@ func TestFilteredBazelArgs(t *testing.T) {
 	}{
 		{
 			name:     "unscoped args pass through all platforms",
-			platform: PlatformMacOSArm64,
+			platform: PlatformDarwinArm64,
 			args:     []string{"--verbose_failures", "--define=foo=bar"},
 			want:     []string{"--verbose_failures", "--define=foo=bar"},
 		},
@@ -322,7 +322,7 @@ func TestFilteredBazelArgs(t *testing.T) {
 		},
 		{
 			name:     "non-matching platform scoped arg excluded",
-			platform: PlatformMacOSArm64,
+			platform: PlatformDarwinArm64,
 			args:     []string{"linux-arm64:--linux-only", "--common"},
 			want:     []string{"--common"},
 		},
@@ -330,7 +330,7 @@ func TestFilteredBazelArgs(t *testing.T) {
 			name:     "all three platforms mixed",
 			platform: PlatformLinuxAmd64,
 			args: []string{
-				"macos-arm64:--mac-flag",
+				"darwin-arm64:--mac-flag",
 				"linux-arm64:--arm-flag",
 				"linux-amd64:--amd-flag",
 				"--always",
@@ -338,9 +338,9 @@ func TestFilteredBazelArgs(t *testing.T) {
 			want: []string{"--amd-flag", "--always"},
 		},
 		{
-			name:     "zero platform defaults to macos-arm64",
+			name:     "zero platform defaults to darwin-arm64",
 			platform: "",
-			args:     []string{"macos-arm64:--mac-flag", "linux-arm64:--linux-flag"},
+			args:     []string{"darwin-arm64:--mac-flag", "linux-arm64:--linux-flag"},
 			want:     []string{"--mac-flag"},
 		},
 	}
@@ -372,8 +372,8 @@ func TestLinuxScriptRunnerContainsOrbRun(t *testing.T) {
 }
 
 func TestDetachedRunnerDetachesFromSSH(t *testing.T) {
-	b := NewBuilder(Config{Platform: PlatformMacOSArm64})
-	runner := b.detachedRunner("/tmp/jobs/envoy-abc123ef-macos-arm64")
+	b := NewBuilder(Config{Platform: PlatformDarwinArm64})
+	runner := b.detachedRunner("/tmp/jobs/envoy-abc123ef-darwin-arm64")
 	// nohup must close stdin/stdout/stderr so SSH exits immediately instead
 	// of hanging waiting for the background process's file descriptors.
 	for _, want := range []string{

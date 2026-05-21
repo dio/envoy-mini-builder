@@ -16,6 +16,12 @@ gh auth login
 
 - **[OrbStack](https://orbstack.dev/)** on the Mac mini — required for Linux builds; macOS builds run natively
 
+  Both Linux machines must use **Debian 11 (Bullseye)** — the bundled Envoy sysroots require glibc < 2.34:
+  ```sh
+  orb create --arch arm64 debian:11 linux-arm64
+  orb create --arch amd64 debian:11 linux-amd64
+  ```
+
 ## Install
 
 ```sh
@@ -43,7 +49,7 @@ envoy-mini-builder build --sha <ref> [flags]
 | `--out` | `./dist` | Local directory for the downloaded binary |
 | `--suffix` | | Suffix appended to binary/asset name (e.g. `-patched`) |
 | `--no-strip` | `false` | Skip post-build `strip -x` |
-| `--platform` | `macos-arm64` | Target: `macos-arm64` \| `linux-arm64` \| `linux-amd64` |
+| `--platform` | `darwin-arm64` | Target: `darwin-arm64` \| `linux-arm64` \| `linux-amd64` |
 | `--all-platforms` | `false` | Build all supported platforms under one release |
 | `--host` | `dio@mini` | SSH host of the Mac mini |
 | `--port` | `22` | SSH port |
@@ -86,7 +92,7 @@ envoy-mini-builder build --sha main --host user@192.168.1.10 --port 2222
 
 | Variable | Description |
 |----------|-------------|
-| `BUILDBUDDY_API_KEY_MACOS_ARM64` | BuildBuddy key for macOS arm64 builds |
+| `BUILDBUDDY_API_KEY_DARWIN_ARM64` | BuildBuddy key for darwin arm64 builds |
 | `BUILDBUDDY_API_KEY_LINUX_ARM64` | BuildBuddy key for Linux arm64 builds |
 | `BUILDBUDDY_API_KEY_LINUX_AMD64` | BuildBuddy key for Linux amd64 builds |
 | `BUILDBUDDY_API_KEY` | Fallback key used when no platform-specific var is set |

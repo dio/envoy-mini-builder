@@ -162,17 +162,15 @@ export PATH="$HOME/.local/bin:$PATH"
 
 echo "→ host: $(hostname) $(uname -m) $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-linux}")"
 
-# Envoy's bundled x86_64 sysroot has a Scrt1.o built against glibc < 2.34 which
-# references __libc_csu_fini/__libc_csu_init — symbols removed in glibc 2.34.
-# This only affects amd64; arm64 sysroot does not have this constraint.
-if [[ "$(uname -m)" == "x86_64" ]]; then
-  GLIBC_VER=$(ldd --version 2>/dev/null | awk 'NR==1{print $NF}')
-  GLIBC_MINOR="${GLIBC_VER##*.}"
-  if [[ "${GLIBC_VER%%.*}" -gt 2 ]] || { [[ "${GLIBC_VER%%.*}" -eq 2 ]] && [[ "$GLIBC_MINOR" -ge 34 ]]; }; then
-    echo "ERROR: glibc ${GLIBC_VER} detected on x86_64. Envoy amd64 builds require glibc < 2.34." >&2
-    echo "  Use Debian 11 (Bullseye): orb create --arch amd64 debian:11 linux-amd64" >&2
-    exit 1
-  fi
+# Both arm64 and amd64 bundled sysroots have a Scrt1.o built against glibc < 2.34
+# which references __libc_csu_fini/__libc_csu_init — symbols removed in glibc 2.34.
+GLIBC_VER=$(ldd --version 2>/dev/null | awk 'NR==1{print $NF}')
+GLIBC_MINOR="${GLIBC_VER##*.}"
+if [[ "${GLIBC_VER%%.*}" -gt 2 ]] || { [[ "${GLIBC_VER%%.*}" -eq 2 ]] && [[ "$GLIBC_MINOR" -ge 34 ]]; }; then
+  ORBARCHA=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+  echo "ERROR: glibc ${GLIBC_VER} detected. Envoy Linux builds require glibc < 2.34." >&2
+  echo "  Use Debian 11 (Bullseye): orb create --arch ${ORBARCHA} debian:11 linux-${ORBARCHA}" >&2
+  exit 1
 fi
 
 # ── bootstrap ─────────────────────────────────────────────────────────────────

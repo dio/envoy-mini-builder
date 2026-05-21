@@ -117,7 +117,7 @@ func init() {
 		Args:  cobra.ExactArgs(1),
 		RunE:  runLogs,
 	}
-	logsCmd.Flags().StringVar(&logsPlatform, "platform", string(mini.PlatformMacOSArm64), "Platform to tail logs for")
+	logsCmd.Flags().StringVar(&logsPlatform, "platform", string(mini.PlatformDarwinArm64), "Platform to tail logs for")
 	rootCmd.AddCommand(logsCmd)
 }
 
@@ -200,7 +200,6 @@ func runFetch(cmd *cobra.Command, args []string) error {
 
 	// Download binaries.
 	var localPaths []string
-	var platNames []string
 	for _, j := range matching {
 		b := mini.NewBuilder(mini.Config{SSHHost: j.SSHHost, SSHPort: j.SSHPort, Platform: mini.Platform(j.Platform)})
 
@@ -223,6 +222,9 @@ func runFetch(cmd *cobra.Command, args []string) error {
 
 		// Write params JSON alongside the binary.
 		params := buildParams{
+			Repo:     j.EnvoyRepo,
+			SHA:      j.CommitSHA,
+			PatchURL: j.PatchURL,
 			Platform: j.Platform,
 			BuiltAt:  time.Now().UTC().Format(time.RFC3339),
 		}
@@ -232,13 +234,12 @@ func runFetch(cmd *cobra.Command, args []string) error {
 		}
 
 		localPaths = append(localPaths, localPath, paramsPath)
-		platNames = append(platNames, j.Platform)
 	}
 
 	// Publish release.
 	if !noRelease {
 		header("Ensure release %s", tag)
-		body := releaseBody("", tag, "", platNames)
+		body := releaseBody(first.EnvoyRepo, first.CommitSHA, first.PatchURL)
 		if err := ghEnsureRelease(ghRepo, tag, body); err != nil {
 			return fmt.Errorf("ensure release: %w", err)
 		}

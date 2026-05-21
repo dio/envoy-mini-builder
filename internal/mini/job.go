@@ -16,6 +16,9 @@ type Job struct {
 	SSHPort    int        `json:"ssh_port"`
 	RemoteDir  string     `json:"remote_dir"` // absolute path on the mini
 	GHRepo     string     `json:"gh_repo"`
+	EnvoyRepo  string     `json:"envoy_repo"`
+	CommitSHA  string     `json:"commit_sha"`
+	PatchURL   string     `json:"patch_url,omitempty"`
 	Suffix     string     `json:"suffix"`
 	NoRelease  bool       `json:"no_release"`
 	StartedAt  time.Time  `json:"started_at"`

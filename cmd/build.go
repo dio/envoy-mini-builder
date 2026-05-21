@@ -83,16 +83,16 @@ func init() {
 	f.BoolVar(&bf.noRelease, "no-release", false, "Build only — skip release creation and upload")
 	f.BoolVar(&bf.forceBuild, "force-build", false, "Always rebuild even if the asset already exists in the release")
 	f.StringVar(&bf.outDir, "out", "./dist", "Local directory to save the downloaded binary")
-	f.StringVar(&bf.suffix, "suffix", "", "Suffix appended to binary and asset names (e.g. -patched → envoy-macos-arm64-patched)")
+	f.StringVar(&bf.suffix, "suffix", "", "Suffix appended to binary and asset names (e.g. -patched → envoy-darwin-arm64-patched)")
 	f.BoolVar(&bf.noStrip, "no-strip", false, "Skip post-build strip (useful for symbol analysis)")
-	f.StringVar(&bf.platform, "platform", string(mini.PlatformMacOSArm64), "Target platform: macos-arm64 | linux-arm64 | linux-amd64")
+	f.StringVar(&bf.platform, "platform", string(mini.PlatformDarwinArm64), "Target platform: darwin-arm64 | linux-arm64 | linux-amd64")
 	f.BoolVar(&bf.allPlatforms, "all-platforms", false, "Build for all supported platforms sequentially under one release")
 	f.StringVar(&bf.sshHost, "host", "dio@mini", "SSH host for the Mac mini")
 	f.IntVar(&bf.sshPort, "port", 22, "SSH port")
 	f.StringVar(&bf.bazelJobs, "jobs", "HOST_CPUS", "Bazel --jobs value")
 	f.StringArrayVar(&bf.bazelArgs, "bazel-arg", nil, "Additional Bazel argument appended to build; repeatable; prefix platform: to scope (e.g. linux-arm64:--flag)")
 	f.StringVar(&bf.ghRepo, "gh-repo", "dio/envoy-builder", "GitHub repo for release assets (owner/repo)")
-	f.StringVar(&bf.bbKey, "bb-key", "", "BuildBuddy API key (all platforms); per-platform env vars: BUILDBUDDY_API_KEY_MACOS_ARM64, BUILDBUDDY_API_KEY_LINUX_ARM64, BUILDBUDDY_API_KEY_LINUX_AMD64; fallback: BUILDBUDDY_API_KEY")
+	f.StringVar(&bf.bbKey, "bb-key", "", "BuildBuddy API key (all platforms); per-platform env vars: BUILDBUDDY_API_KEY_DARWIN_ARM64, BUILDBUDDY_API_KEY_LINUX_ARM64, BUILDBUDDY_API_KEY_LINUX_AMD64; fallback: BUILDBUDDY_API_KEY")
 	f.BoolVar(&bf.detach, "detach", false, "Detach after starting — build runs in background on the mini; use 'jobs', 'logs', 'fetch' to manage")
 	_ = buildCmd.MarkFlagRequired("sha")
 
@@ -101,7 +101,7 @@ func init() {
 
 // allSupportedPlatforms lists every platform the tool knows how to build.
 var allSupportedPlatforms = []mini.Platform{
-	mini.PlatformMacOSArm64,
+	mini.PlatformDarwinArm64,
 	mini.PlatformLinuxArm64,
 	mini.PlatformLinuxAmd64,
 }
@@ -141,9 +141,9 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 	} else {
 		plat := mini.Platform(bf.platform)
 		switch plat {
-		case mini.PlatformMacOSArm64, mini.PlatformLinuxArm64, mini.PlatformLinuxAmd64:
+		case mini.PlatformDarwinArm64, mini.PlatformLinuxArm64, mini.PlatformLinuxAmd64:
 		default:
-			return fmt.Errorf("unknown --platform %q: must be macos-arm64, linux-arm64, or linux-amd64", bf.platform)
+			return fmt.Errorf("unknown --platform %q: must be darwin-arm64, linux-arm64, or linux-amd64", bf.platform)
 		}
 		platforms = []mini.Platform{plat}
 	}
@@ -261,7 +261,7 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 	// When --detach is set, skip this step; 'fetch' will create the release.
 	if !bf.noRelease && !bf.detach {
 		header("Ensure release %s", tag)
-		body := releaseBody(bf.envoyRepo, sha, bf.patchURL, platNames)
+		body := releaseBody(bf.envoyRepo, sha, bf.patchURL)
 		if err := ghEnsureRelease(bf.ghRepo, tag, body); err != nil {
 			return fmt.Errorf("ensure release: %w", err)
 		}
@@ -311,6 +311,9 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 				SSHPort:   bf.sshPort,
 				RemoteDir: remoteDir,
 				GHRepo:    bf.ghRepo,
+				EnvoyRepo: bf.envoyRepo,
+				CommitSHA: sha,
+				PatchURL:  bf.patchURL,
 				Suffix:    bf.suffix,
 				NoRelease: bf.noRelease,
 				StartedAt: time.Now().UTC(),
@@ -462,21 +465,19 @@ func ghRun(args ...string) error {
 
 // ── misc helpers ──────────────────────────────────────────────────────────────
 
-func releaseBody(repo, sha, patchURL string, platforms []string) string {
+func releaseBody(repo, sha, patchURL string) string {
 	patch := "—"
 	if patchURL != "" {
 		patch = patchURL
 	}
 	return fmt.Sprintf(`## Envoy build
 
-| Field     | Value |
-|-----------|-------|
-| Source    | `+"`%s`"+` |
-| Commit    | `+"`%s`"+` |
-| Platforms | %s |
-| Patch     | %s |
-| Built     | %s |`,
-		repo, sha, strings.Join(platforms, ", "), patch, time.Now().UTC().Format(time.RFC3339))
+| Field  | Value |
+|--------|-------|
+| Source | `+"`%s`"+` |
+| Commit | `+"`%s`"+` |
+| Patch  | %s |`,
+		repo, sha, patch)
 }
 
 func header(format string, args ...any) {
