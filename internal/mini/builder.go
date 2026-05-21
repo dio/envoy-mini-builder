@@ -385,21 +385,28 @@ func (b *Builder) scpDownload(ctx context.Context, remotePath, localPath string)
 	return b.scpDownloadDirect(ctx, remotePath, localPath)
 }
 
-// scpDownloadViaOrb copies a file from an OrbStack Linux VM to localPath.
-// It stages the file on the Mac mini host using orb cp, downloads it via scp,
-// then removes the staging file.
+// scpDownloadViaOrb copies a file from an OrbStack Linux VM to localPath by
+// streaming it over SSH: `orb run -m <machine> cat <file>` pipes the binary
+// through the existing SSH connection directly to local disk.
 func (b *Builder) scpDownloadViaOrb(ctx context.Context, vmPath, localPath string) error {
 	machine := string(b.cfg.Platform.resolved())
-	base := vmPath[strings.LastIndex(vmPath, "/")+1:]
-	hostTmp := "/tmp/envoy-mini-builder-stage-" + base
-	stageCmd := `PATH=/opt/homebrew/bin:$PATH orb cp ` + machine + ":" + shellQuote(vmPath) + ` ` + shellQuote(hostTmp)
-	if _, err := b.sshOutput(ctx, stageCmd); err != nil {
-		return fmt.Errorf("copy from VM to host: %w", err)
+	remoteCmd := `PATH=/opt/homebrew/bin:$PATH orb run -m ` + shellQuote(machine) + ` cat ` + shellQuote(vmPath)
+
+	args := b.sshArgs(remoteCmd)
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	data, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("stream binary from VM: %w", err)
 	}
-	defer func() {
-		_, _ = b.sshOutput(ctx, "rm -f "+shellQuote(hostTmp))
-	}()
-	return b.scpDownloadDirect(ctx, hostTmp, localPath)
+	if err := os.WriteFile(localPath, data, 0o755); err != nil {
+		return fmt.Errorf("write binary: %w", err)
+	}
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("\033[32m✓\033[0m Downloaded %d bytes → %s\n", info.Size(), localPath)
+	return nil
 }
 
 func (b *Builder) scpDownloadDirect(ctx context.Context, remotePath, localPath string) error {

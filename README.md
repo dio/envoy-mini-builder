@@ -131,7 +131,7 @@ The auto tag `envoy-{sha8}` is reserved for default-param builds (`envoyproxy/en
 
 **Linux builds**
 
-Same, but the build script runs inside an OrbStack VM via `orb run -m <machine>`. The binary lives inside the VM, so after the build it is staged on the Mac mini host with `orb cp` before the `scp` download.
+Same, but the build script runs inside an OrbStack VM via `orb run -m <machine>`. The binary lives inside the VM, so it is streamed directly to the local machine via `orb run -m <machine> cat <path>` over the existing SSH connection — no intermediate staging needed.
 
 ## Auth
 
