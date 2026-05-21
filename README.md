@@ -165,21 +165,29 @@ On failure the draft is marked `[FAILED]` as a prerelease so you don't lose part
 | Custom Bazel flags | `abc123ef` | `envoy-abc123ef-custom` | `-custom` | `envoy-macos-arm64-custom` |
 | All platforms | `abc123ef` | *(auto)* | | `envoy-{platform}` |
 
-The default tag `envoy-{sha8}` gives one canonical release per Envoy commit.
-Use `--tag` + `--suffix` together for patch/variant builds to keep both the
-release and the asset names unambiguous.
+The auto tag `envoy-{sha8}` is **reserved for default-param builds only**
+(`envoyproxy/envoy`, no patch, no extra Bazel args, no `--no-strip`).
+Any variant must supply `--tag` explicitly — the CLI errors if you use
+non-default params without one, preventing silent collisions with the
+canonical release for that SHA.
+
+> **Caveat:** two runs with different `--tag` values but the same asset name
+> can still collide if `--force-build` is used. A `.params.json` sidecar is
+> uploaded alongside every binary; the CLI compares it on subsequent runs and
+> warns before overwriting.
 
 ### Default: download if exists, build if not
 
-The default behavior checks the release for each platform's asset before
-building. If the asset already exists it is downloaded; only missing assets
-trigger a remote build. Use `--force-build` to always rebuild:
+For each platform the CLI first checks the release for an existing asset.
+If found, it is downloaded (and its `.params.json` verified to match current
+params). Only missing or mismatched assets trigger a remote build.
+Use `--force-build` to always rebuild:
 
 ```sh
 # Downloads existing asset if found, otherwise builds
 envoy-mini-builder build --sha abc123ef
 
-# Force rebuild even if the asset is already published
+# Force rebuild even if the asset is already published (warns if params differ)
 envoy-mini-builder build --sha abc123ef --force-build
 ```
 

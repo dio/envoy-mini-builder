@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 	"time"
 
@@ -102,6 +104,33 @@ var allSupportedPlatforms = []mini.Platform{
 	mini.PlatformLinuxAmd64,
 }
 
+// buildParams records every build-affecting input. It is uploaded alongside
+// each binary as <asset>.params.json and compared on subsequent runs.
+type buildParams struct {
+	Repo      string   `json:"repo"`
+	SHA       string   `json:"sha"`
+	PatchURL  string   `json:"patch_url,omitempty"`
+	BazelArgs []string `json:"bazel_args,omitempty"`
+	NoStrip   bool     `json:"no_strip,omitempty"`
+	Platform  string   `json:"platform"`
+	BuiltAt   string   `json:"built_at"`
+}
+
+// sameAs compares all build-affecting fields, ignoring BuiltAt.
+func (p buildParams) sameAs(other buildParams) bool {
+	return p.Repo == other.Repo &&
+		p.SHA == other.SHA &&
+		p.PatchURL == other.PatchURL &&
+		reflect.DeepEqual(p.BazelArgs, other.BazelArgs) &&
+		p.NoStrip == other.NoStrip &&
+		p.Platform == other.Platform
+}
+
+func (p buildParams) String() string {
+	b, _ := json.Marshal(p)
+	return string(b)
+}
+
 func runBuild(cmd *cobra.Command, _ []string) error {
 	// Determine platform list.
 	var platforms []mini.Platform
@@ -127,6 +156,21 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 	tag := bf.releaseTag
 	if tag == "" {
 		tag = fmt.Sprintf("envoy-%s", shortSHA)
+		// The auto tag is reserved for default-param builds only.
+		// Any variant (patch, extra bazel args, no-strip, fork) must
+		// carry an explicit --tag so it never silently collides with
+		// the canonical release for that SHA.
+		isVariant := bf.patchURL != "" ||
+			len(bf.bazelArgs) > 0 ||
+			bf.noStrip ||
+			bf.envoyRepo != "envoyproxy/envoy"
+		if isVariant {
+			return fmt.Errorf(
+				"non-default build params require an explicit --tag.\n"+
+					"  Suggested: --tag envoy-%s-<variant>\n"+
+					"  (keeps the canonical envoy-%s release for default params)",
+				shortSHA, shortSHA)
+		}
 	}
 
 	platNames := make([]string, len(platforms))
@@ -157,20 +201,46 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 	outDir := strings.TrimRight(bf.outDir, "/")
 
 	// ── Per-platform: download existing asset or build ───────────────────────
-	// When --no-release or --force-build, always build.
-	// Otherwise try gh release download first; only build if asset not found.
 	var needsBuild []mini.Platform
 	for _, plat := range platforms {
 		platStr := string(plat)
 		pattern := fmt.Sprintf("envoy-%s%s", platStr, bf.suffix)
 		localPath := fmt.Sprintf("%s/%s", outDir, pattern)
 
+		current := buildParams{
+			Repo:      bf.envoyRepo,
+			SHA:       sha,
+			PatchURL:  bf.patchURL,
+			BazelArgs: bf.bazelArgs,
+			NoStrip:   bf.noStrip,
+			Platform:  platStr,
+		}
+
 		if !bf.noRelease && !bf.forceBuild {
+			// Try to use existing asset.
 			if ghTryDownload(bf.ghRepo, tag, pattern, bf.outDir) {
+				// Check whether it was built with the same params.
+				if existing, ok := ghTryDownloadParams(bf.ghRepo, tag, pattern, bf.outDir); ok && !current.sameAs(*existing) {
+					return fmt.Errorf(
+						"existing asset %q was built with different params.\n"+
+							"  existing: %s\n"+
+							"  current:  %s\n"+
+							"Use --force-build to overwrite, or --tag/--suffix for a separate release.",
+						pattern, existing, &current)
+				}
 				okf("Existing asset: %s", localPath)
 				continue
 			}
 		}
+
+		if bf.forceBuild && !bf.noRelease {
+			// Warn if we are about to overwrite an asset built with different params.
+			if existing, ok := ghTryDownloadParams(bf.ghRepo, tag, pattern, bf.outDir); ok && !current.sameAs(*existing) {
+				warnf("force-build: overwriting %q (built with different params)\n  existing: %s\n  current:  %s",
+					pattern, existing, &current)
+			}
+		}
+
 		needsBuild = append(needsBuild, plat)
 	}
 
@@ -192,6 +262,7 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 	// ── Build platforms that have no existing asset ───────────────────────────
 	for _, plat := range needsBuild {
 		platStr := string(plat)
+		pattern := fmt.Sprintf("envoy-%s%s", platStr, bf.suffix)
 
 		// Resolve BuildBuddy key: flag > platform-specific env > generic env.
 		bbKey := bf.bbKey
@@ -217,7 +288,7 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 			Platform:  plat,
 		})
 
-		localPath := fmt.Sprintf("%s/envoy-%s%s", outDir, platStr, bf.suffix)
+		localPath := fmt.Sprintf("%s/%s", outDir, pattern)
 		if err := bld.Run(cmd.Context(), localPath); err != nil {
 			if !bf.noRelease {
 				_ = ghMarkReleaseFailed(bf.ghRepo, tag)
@@ -226,12 +297,31 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 		}
 		okf("Binary: %s", localPath)
 
+		// Write params JSON alongside the binary.
+		params := buildParams{
+			Repo:      bf.envoyRepo,
+			SHA:       sha,
+			PatchURL:  bf.patchURL,
+			BazelArgs: bf.bazelArgs,
+			NoStrip:   bf.noStrip,
+			Platform:  platStr,
+			BuiltAt:   time.Now().UTC().Format(time.RFC3339),
+		}
+		paramsPath := localPath + ".params.json"
+		if data, err := json.MarshalIndent(params, "", "  "); err == nil {
+			_ = os.WriteFile(paramsPath, data, 0o644)
+		}
+
 		if !bf.noRelease {
-			// gh release upload uses the file's basename as the asset name.
+			// Upload binary (gh uses basename as asset name).
 			if err := ghUploadAsset(bf.ghRepo, tag, localPath); err != nil {
 				return fmt.Errorf("upload asset [%s]: %w", platStr, err)
 			}
-			okf("Asset uploaded: envoy-%s%s", platStr, bf.suffix)
+			// Upload params sidecar.
+			if err := ghUploadAsset(bf.ghRepo, tag, paramsPath); err != nil {
+				return fmt.Errorf("upload params [%s]: %w", platStr, err)
+			}
+			okf("Asset uploaded: %s", pattern)
 		}
 	}
 
@@ -259,6 +349,29 @@ func ghTryDownload(repo, tag, pattern, dir string) bool {
 		"--clobber",
 	)
 	return cmd.Run() == nil
+}
+
+// ghTryDownloadParams downloads and parses the params sidecar for an asset.
+func ghTryDownloadParams(repo, tag, pattern, dir string) (*buildParams, bool) {
+	paramsPattern := pattern + ".params.json"
+	cmd := exec.Command("gh", "release", "download", tag,
+		"--repo", repo,
+		"--pattern", paramsPattern,
+		"--dir", dir,
+		"--clobber",
+	)
+	if cmd.Run() != nil {
+		return nil, false
+	}
+	data, err := os.ReadFile(fmt.Sprintf("%s/%s", strings.TrimRight(dir, "/"), paramsPattern))
+	if err != nil {
+		return nil, false
+	}
+	var p buildParams
+	if err := json.Unmarshal(data, &p); err != nil {
+		return nil, false
+	}
+	return &p, true
 }
 
 // ghEnsureRelease creates a draft release if one doesn't exist yet.
@@ -333,4 +446,8 @@ func infof(format string, args ...any) {
 
 func okf(format string, args ...any) {
 	fmt.Printf("\033[32m✓\033[0m "+format+"\n", args...)
+}
+
+func warnf(format string, args ...any) {
+	fmt.Printf("\033[33m⚠\033[0m  "+format+"\n", args...)
 }
