@@ -313,7 +313,7 @@ func runBuild(cmd *cobra.Command, _ []string) error {
 			}
 			okf("Build started in background: %s [%s]", tag, platStr)
 			fmt.Printf("  Remote dir: %s\n", remoteDir)
-			fmt.Printf("  Use 'jobs' to check status, 'logs --tag %s --platform %s' to tail logs,\n", tag, platStr)
+			fmt.Printf("  Use 'jobs' to check status, 'logs %s --platform %s' to tail logs,\n", tag, platStr)
 			fmt.Printf("  and 'fetch %s' to download and publish when complete.\n", tag)
 			continue
 		}
