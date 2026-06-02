@@ -302,6 +302,13 @@ func runBuild(cmd *cobra.Command, args []string) error {
 			bbKey = os.Getenv("BUILDBUDDY_API_KEY")
 		}
 
+		// linux-amd64 runs in an emulated OrbStack VM with limited RAM; cap
+		// parallel Bazel actions when the user has not overridden --jobs.
+		bazelJobs := bf.bazelJobs
+		if plat == mini.PlatformLinuxAmd64 && bazelJobs == "HOST_CPUS" {
+			bazelJobs = "6"
+		}
+
 		bld := mini.NewBuilder(mini.Config{
 			SSHHost:   bf.sshHost,
 			SSHPort:   bf.sshPort,
@@ -309,7 +316,7 @@ func runBuild(cmd *cobra.Command, args []string) error {
 			CommitSHA: sha,
 			PatchURL:  patchURL,
 			PatchFile: patchFile,
-			BazelJobs: bf.bazelJobs,
+			BazelJobs: bazelJobs,
 			BazelArgs: append([]string(nil), bf.bazelArgs...),
 			BBKey:     bbKey,
 			NoStrip:   bf.noStrip,
