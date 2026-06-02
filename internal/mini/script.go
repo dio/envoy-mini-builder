@@ -152,7 +152,7 @@ TOTAL=$(nm -g "${ABS_BINARY}" 2>/dev/null \
   | grep "envoy_dynamic_module_callback" | wc -l | tr -d ' ')
 echo "→ dynamic_module_callback symbols: ${TOTAL}"
 
-echo "BINARY_PATH:${ABS_BINARY}"
+echo "BINARY_PATH:$(realpath "${ABS_BINARY}")"
 echo "ABI_HEADER_PATH:${SRC_DIR}/source/extensions/dynamic_modules/abi/abi.h"
 `
 
@@ -314,7 +314,7 @@ TOTAL=$(nm -g "${ABS_BINARY}" 2>/dev/null \
   | grep "envoy_dynamic_module_callback" | wc -l | tr -d ' ')
 echo "→ dynamic_module_callback symbols: ${TOTAL}"
 
-echo "BINARY_PATH:${ABS_BINARY}"
+echo "BINARY_PATH:$(realpath "${ABS_BINARY}")"
 echo "ABI_HEADER_PATH:${SRC_DIR}/source/extensions/dynamic_modules/abi/abi.h"
 `
 
