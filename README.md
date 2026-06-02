@@ -42,7 +42,7 @@ envoy-mini-builder build --sha <ref> [flags]
 |------|---------|-------------|
 | `--sha` | *(required)* | Commit SHA, branch, or tag |
 | `--repo` | `envoyproxy/envoy` | Source repo (`owner/repo`); forks work |
-| `--patch` | | Raw URL to a `.patch` file applied before build |
+| `--patch` | | Patch applied before build: `https://` URL or `file://` local path |
 | `--tag` | `envoy-{sha8}` | Override release tag; required for variant builds |
 | `--no-release` | `false` | Build only, skip release create/upload |
 | `--force-build` | `false` | Always rebuild even if the asset already exists |
@@ -96,6 +96,127 @@ envoy-mini-builder build --sha main --host user@192.168.1.10 --port 2222
 | `BUILDBUDDY_API_KEY_LINUX_ARM64` | BuildBuddy key for Linux arm64 builds |
 | `BUILDBUDDY_API_KEY_LINUX_AMD64` | BuildBuddy key for Linux amd64 builds |
 | `BUILDBUDDY_API_KEY` | Fallback key used when no platform-specific var is set |
+
+## Running tests
+
+`test run` compiles and runs Bazel test targets on the remote Mac mini without
+producing a release binary. The main use-case is **validate a patch before
+building**: apply the patch remotely, compile the affected test, run it,
+stream the output live.
+
+### Walkthrough: patch → find test → run single case
+
+**1. List test targets matching your change**
+
+```sh
+# All test targets under the affected package
+envoy-mini-builder test ls --sha 0d6e3c60aa55 \
+  --path test/extensions/clusters/dynamic_modules/...
+
+# Narrow by name glob
+envoy-mini-builder test ls "*cluster*" --sha 0d6e3c60aa55 \
+  --path test/extensions/clusters/...
+
+# Only unit tests (size = small or medium)
+envoy-mini-builder test ls --sha 0d6e3c60aa55 --type unit \
+  --path test/extensions/clusters/dynamic_modules/...
+```
+
+Sample output:
+```
+//test/extensions/clusters/dynamic_modules:cluster_test
+1 test target(s)
+```
+
+If your patch adds new `cc_test` targets, pass `--patch` to see them:
+
+```sh
+envoy-mini-builder test ls --sha 0d6e3c60aa55 \
+  --patch file:///path/to/my.patch \
+  --path test/extensions/clusters/dynamic_modules/...
+```
+
+**2. Run the whole test target**
+
+```sh
+envoy-mini-builder test run \
+  --sha   0d6e3c60aa55 \
+  --patch file:///path/to/my.patch \
+  --target //test/extensions/clusters/dynamic_modules:cluster_test
+```
+
+The patch is uploaded via `scp` before the script runs; the remote
+`git apply` happens inside the already-cloned workspace, so only the
+incremental diff is compiled.
+
+**3. Run a single GTest case**
+
+Use `--filter` to pass `--test_filter` to Bazel (forwarded as
+`--gtest_filter` inside the binary). Any GTest filter syntax works:
+
+```sh
+# Exact case
+envoy-mini-builder test run \
+  --sha    0d6e3c60aa55 \
+  --patch  file:///path/to/my.patch \
+  --target //test/extensions/clusters/dynamic_modules:cluster_test \
+  --filter "DynamicModuleClusterTest.AbiCallbacksAddHostsWithHostnames"
+
+# Glob across cases in a suite
+envoy-mini-builder test run \
+  --sha    0d6e3c60aa55 \
+  --patch  file:///path/to/my.patch \
+  --target //test/extensions/clusters/dynamic_modules:cluster_test \
+  --filter "DynamicModuleClusterTest.*Hostname*"
+```
+
+**4. Multiple targets at once**
+
+`--target` is repeatable:
+
+```sh
+envoy-mini-builder test run \
+  --sha    0d6e3c60aa55 \
+  --patch  file:///path/to/my.patch \
+  --target //test/extensions/clusters/dynamic_modules:cluster_test \
+  --target //test/extensions/dynamic_modules:abi_test
+```
+
+### Searching targets with `query`
+
+`query` runs a raw `bazel query` and prints all matching labels — not just
+test targets. Useful for checking BUILD visibility or locating a library:
+
+```sh
+envoy-mini-builder query "dynamic_module*" --sha main \
+  --path source/extensions/clusters/dynamic_modules/...
+```
+
+### Patch sources
+
+Both `--patch` flags accept:
+
+| Form | Behaviour |
+|------|-----------|
+| `https://…` or `http://…` | fetched with `curl` on the remote |
+| `file:///abs/path/to/file.patch` | uploaded via `scp` to a temp path; deleted on exit |
+
+### `test` flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--sha` | *(required)* | Commit SHA, branch, or tag |
+| `--patch` | | Patch: `https://` URL or `file://` local path |
+| `--target` | *(required for `run`)* | Bazel test target; repeatable |
+| `--filter` | | GTest filter (`--test_filter` value) |
+| `--path` | `...` | Package path for `ls` |
+| `--type` | | `unit` or `integration` (size-based) for `ls` |
+| `--repo` | `envoyproxy/envoy` | Source repo |
+| `--host` | `dio@mini` | SSH host |
+| `--port` | `22` | SSH port |
+| `--jobs` | `HOST_CPUS` | Bazel `--jobs` |
+| `--bb-key` | | BuildBuddy API key (remote cache) |
+| `--platform` | `darwin-arm64` | `darwin-arm64` \| `linux-arm64` \| `linux-amd64` |
 
 ## Detached builds
 

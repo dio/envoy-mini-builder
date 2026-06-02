@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -244,7 +245,8 @@ type Config struct {
 	SSHPort   int
 	EnvoyRepo string
 	CommitSHA string
-	PatchURL  string
+	PatchURL  string // https:// or http:// URL to a .patch file
+	PatchFile string // remote path to an already-uploaded patch (from file:// handling in cmd)
 	BazelJobs string
 	BazelArgs []string
 	BBKey     string   // BuildBuddy API key for current platform; empty = local cache only
@@ -292,7 +294,9 @@ func NewBuilder(cfg Config) *Builder {
 // method; while OpenSSH servers support both plain publickey and the hostbound
 // variant (neither is universally mandatory), keeping the entire transport
 // inside the system ssh stack avoids the auth gap on both paths.
-func (b *Builder) Run(ctx context.Context, localPath string) error {
+// Run executes the build on the remote host, downloads the binary to localPath,
+// downloads abi.h alongside it, and returns the local abi.h path.
+func (b *Builder) Run(ctx context.Context, localPath string) (string, error) {
 	plat := b.cfg.Platform.resolved()
 
 	runner := remoteScriptRunnerDarwin
@@ -302,31 +306,43 @@ func (b *Builder) Run(ctx context.Context, localPath string) error {
 		script = remoteScriptLinux
 	}
 
-	remoteBinPath, err := b.execScript(ctx, runner, b.buildPrologue()+script)
+	remoteBinPath, remoteABIPath, err := b.execScript(ctx, runner, b.buildPrologue()+script)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	fmt.Printf("\033[36m▶\033[0m Downloading %s\n", remoteBinPath)
 	if err := b.scpDownload(ctx, remoteBinPath, localPath); err != nil {
-		return fmt.Errorf("scp download: %w", err)
+		return "", fmt.Errorf("scp download: %w", err)
 	}
-	return nil
+
+	// Download abi.h next to the binary. It is platform-independent; the caller
+	// may upload it once as a shared release asset.
+	abiLocalPath := ""
+	if remoteABIPath != "" {
+		abiLocalPath = filepath.Join(filepath.Dir(localPath), "abi.h")
+		fmt.Printf("\033[36m▶\033[0m Downloading %s\n", remoteABIPath)
+		if err := b.scpDownload(ctx, remoteABIPath, abiLocalPath); err != nil {
+			return "", fmt.Errorf("scp download abi.h: %w", err)
+		}
+	}
+	return abiLocalPath, nil
 }
 
 // execScript runs the build script on the remote host via system ssh(1).
-func (b *Builder) execScript(ctx context.Context, runner, script string) (string, error) {
+// It captures the BINARY_PATH: and ABI_HEADER_PATH: sentinel lines from stdout.
+func (b *Builder) execScript(ctx context.Context, runner, script string) (binPath, abiHeaderPath string, err error) {
 	args := b.sshArgs(runner)
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return "", err
+	stdin, errPipe := cmd.StdinPipe()
+	if errPipe != nil {
+		return "", "", errPipe
 	}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", err
+	stdout, errPipe := cmd.StdoutPipe()
+	if errPipe != nil {
+		return "", "", errPipe
 	}
 
 	var stderrBuf strings.Builder
@@ -334,7 +350,7 @@ func (b *Builder) execScript(ctx context.Context, runner, script string) (string
 	cmd.Stderr = stderrWriter
 
 	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("start ssh: %w", err)
+		return "", "", fmt.Errorf("start ssh: %w", err)
 	}
 
 	go func() {
@@ -342,14 +358,80 @@ func (b *Builder) execScript(ctx context.Context, runner, script string) (string
 		io.WriteString(stdin, script) //nolint:errcheck
 	}()
 
-	var remoteBinPath string
+	var remoteBinPath, remoteABIPath string
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	scanner.Split(splitLinesAndCarriageReturns)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.HasPrefix(line, "BINARY_PATH:") {
+		switch {
+		case strings.HasPrefix(line, "BINARY_PATH:"):
 			remoteBinPath = strings.TrimPrefix(line, "BINARY_PATH:")
+		case strings.HasPrefix(line, "ABI_HEADER_PATH:"):
+			remoteABIPath = strings.TrimPrefix(line, "ABI_HEADER_PATH:")
+		default:
+			fmt.Println(line)
+		}
+	}
+	scanErr := scanner.Err()
+
+	waitErr := cmd.Wait()
+	stderrWriter.finish()
+	if waitErr != nil {
+		tail := lastLines(stderrBuf.String(), 5)
+		if tail != "" {
+			return "", "", fmt.Errorf("remote build failed: %w\nlast stderr:\n%s", waitErr, tail)
+		}
+		return "", "", fmt.Errorf("remote build failed: %w", waitErr)
+	}
+	if scanErr != nil {
+		return "", "", fmt.Errorf("read remote stdout: %w", scanErr)
+	}
+	if remoteBinPath == "" {
+		return "", "", fmt.Errorf("build succeeded but BINARY_PATH sentinel was not emitted")
+	}
+	return remoteBinPath, remoteABIPath, nil
+}
+
+// execScriptCollect runs a remote script like execScript but collects all
+// stdout lines that begin with prefix (returning them without the prefix)
+// instead of looking for a single sentinel. All other lines are printed to
+// stdout as progress. The caller decides how to interpret the collected lines.
+func (b *Builder) execScriptCollect(ctx context.Context, runner, script, prefix string) ([]string, error) {
+	args := b.sshArgs(runner)
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	var stderrBuf strings.Builder
+	stderrWriter := newProgressWriter(os.Stderr, &stderrBuf)
+	cmd.Stderr = stderrWriter
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start ssh: %w", err)
+	}
+
+	go func() {
+		defer stdin.Close()
+		io.WriteString(stdin, script) //nolint:errcheck
+	}()
+
+	var collected []string
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner.Split(splitLinesAndCarriageReturns)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, prefix) {
+			collected = append(collected, strings.TrimPrefix(line, prefix))
 		} else {
 			fmt.Println(line)
 		}
@@ -361,17 +443,14 @@ func (b *Builder) execScript(ctx context.Context, runner, script string) (string
 	if waitErr != nil {
 		tail := lastLines(stderrBuf.String(), 5)
 		if tail != "" {
-			return "", fmt.Errorf("remote build failed: %w\nlast stderr:\n%s", waitErr, tail)
+			return nil, fmt.Errorf("remote script failed: %w\nlast stderr:\n%s", waitErr, tail)
 		}
-		return "", fmt.Errorf("remote build failed: %w", waitErr)
+		return nil, fmt.Errorf("remote script failed: %w", waitErr)
 	}
 	if scanErr != nil {
-		return "", fmt.Errorf("read remote stdout: %w", scanErr)
+		return nil, fmt.Errorf("read remote stdout: %w", scanErr)
 	}
-	if remoteBinPath == "" {
-		return "", fmt.Errorf("build succeeded but BINARY_PATH sentinel was not emitted")
-	}
-	return remoteBinPath, nil
+	return collected, nil
 }
 
 // scpDownload copies a remote file to localPath using system scp(1).
@@ -491,20 +570,22 @@ func (b *Builder) buildPrologue() string {
 		"ENVOY_REPO":         b.cfg.EnvoyRepo,
 		"COMMIT_SHA":         b.cfg.CommitSHA,
 		"PATCH_URL":          b.cfg.PatchURL,
+		"PATCH_FILE":         b.cfg.PatchFile,
 		"BAZEL_JOBS":         b.cfg.BazelJobs,
 		"BUILDBUDDY_API_KEY": b.cfg.BBKey,
 		"SKIP_STRIP":         skipStrip,
 	}
 	var sb strings.Builder
-	for k, v := range vars {
-		fmt.Fprintf(&sb, "%s=%s\n", k, shellQuote(v))
+	// Emit in a deterministic order so scripts are stable across runs.
+	for _, k := range []string{"ENVOY_REPO", "COMMIT_SHA", "PATCH_URL", "PATCH_FILE", "BAZEL_JOBS", "BUILDBUDDY_API_KEY", "SKIP_STRIP"} {
+		fmt.Fprintf(&sb, "%s=%s\n", k, shellQuote(vars[k]))
 	}
 	sb.WriteString("BAZEL_EXTRA_ARGS=(\n")
 	for _, arg := range b.filteredBazelArgs() {
 		fmt.Fprintf(&sb, "  %s\n", shellQuote(arg))
 	}
 	sb.WriteString(")\n")
-	sb.WriteString("export ENVOY_REPO COMMIT_SHA PATCH_URL BAZEL_JOBS BUILDBUDDY_API_KEY\n")
+	sb.WriteString("export ENVOY_REPO COMMIT_SHA PATCH_URL PATCH_FILE BAZEL_JOBS BUILDBUDDY_API_KEY\n")
 	return sb.String()
 }
 

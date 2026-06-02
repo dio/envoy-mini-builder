@@ -71,7 +71,12 @@ cd "${SRC_DIR}"
 echo "→ at $(git rev-parse HEAD)"
 
 # ── patch ─────────────────────────────────────────────────────────────────────
-if [[ -n "${PATCH_URL:-}" ]]; then
+if [[ -n "${PATCH_FILE:-}" ]]; then
+  echo "→ applying uploaded patch: ${PATCH_FILE}"
+  git apply --stat "${PATCH_FILE}"
+  git apply "${PATCH_FILE}"
+  echo "→ patch applied"
+elif [[ -n "${PATCH_URL:-}" ]]; then
   echo "→ fetching patch: ${PATCH_URL}"
   curl -fsSL "${PATCH_URL}" -o /tmp/incoming.patch
   echo "  $(wc -l < /tmp/incoming.patch) lines"
@@ -148,6 +153,7 @@ TOTAL=$(nm -g "${ABS_BINARY}" 2>/dev/null \
 echo "→ dynamic_module_callback symbols: ${TOTAL}"
 
 echo "BINARY_PATH:${ABS_BINARY}"
+echo "ABI_HEADER_PATH:${SRC_DIR}/source/extensions/dynamic_modules/abi/abi.h"
 `
 
 // remoteScriptLinux is the body of the bash script that runs inside the Linux
@@ -245,7 +251,12 @@ cd "${SRC_DIR}"
 echo "→ at $(git rev-parse HEAD)"
 
 # ── patch ─────────────────────────────────────────────────────────────────────
-if [[ -n "${PATCH_URL:-}" ]]; then
+if [[ -n "${PATCH_FILE:-}" ]]; then
+  echo "→ applying uploaded patch: ${PATCH_FILE}"
+  git apply --stat "${PATCH_FILE}"
+  git apply "${PATCH_FILE}"
+  echo "→ patch applied"
+elif [[ -n "${PATCH_URL:-}" ]]; then
   echo "→ fetching patch: ${PATCH_URL}"
   curl -fsSL "${PATCH_URL}" -o /tmp/incoming.patch
   echo "  $(wc -l < /tmp/incoming.patch) lines"
@@ -304,4 +315,229 @@ TOTAL=$(nm -g "${ABS_BINARY}" 2>/dev/null \
 echo "→ dynamic_module_callback symbols: ${TOTAL}"
 
 echo "BINARY_PATH:${ABS_BINARY}"
+echo "ABI_HEADER_PATH:${SRC_DIR}/source/extensions/dynamic_modules/abi/abi.h"
+`
+
+// remoteSetupDarwin is the shared bootstrap + workspace + patch section used
+// by both query and test scripts. It sets WORK_DIR, SRC_DIR, and leaves the
+// shell in SRC_DIR with the patch (if any) already applied.
+const remoteSetupDarwin = `
+set -euo pipefail
+PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$PATH"
+export PATH
+
+echo "→ host: $(hostname) $(uname -m) macOS $(sw_vers -productVersion)"
+
+BREW=/opt/homebrew/bin/brew
+if ! command -v bazel &>/dev/null && ! command -v bazelisk &>/dev/null; then
+  echo "→ installing bazelisk..."
+  ${BREW} install bazelisk
+fi
+echo "→ bazel: $(bazel version 2>&1 | grep -E 'Bazelisk version|Build label' | head -1)"
+
+SLUG=$(echo "${ENVOY_REPO}" | tr '/' '_')
+WORK_DIR="${HOME}/envoy-builder/${SLUG}"
+SRC_DIR="${WORK_DIR}/src"
+mkdir -p "${WORK_DIR}"
+
+CLONE_URL="https://github.com/${ENVOY_REPO}.git"
+if [[ -d "${SRC_DIR}/.git" ]]; then
+  echo "→ updating existing clone..."
+  cd "${SRC_DIR}"
+  git remote set-url origin "${CLONE_URL}"
+  git fetch --depth=1 origin "${COMMIT_SHA}" 2>&1 | tail -3
+  git reset --hard FETCH_HEAD
+  git clean -fdx --exclude=.cache 2>/dev/null || true
+else
+  echo "→ cloning ${ENVOY_REPO} at ${COMMIT_SHA}..."
+  git clone --depth=1 --no-checkout "${CLONE_URL}" "${SRC_DIR}"
+  cd "${SRC_DIR}"
+  git fetch --depth=1 origin "${COMMIT_SHA}" 2>&1 | tail -3
+  git checkout FETCH_HEAD
+fi
+cd "${SRC_DIR}"
+echo "→ at $(git rev-parse HEAD)"
+
+if [[ -n "${PATCH_FILE:-}" ]]; then
+  echo "→ applying uploaded patch: ${PATCH_FILE}"
+  git apply --stat "${PATCH_FILE}"
+  git apply "${PATCH_FILE}"
+  echo "→ patch applied"
+elif [[ -n "${PATCH_URL:-}" ]]; then
+  echo "→ fetching patch: ${PATCH_URL}"
+  curl -fsSL "${PATCH_URL}" -o /tmp/incoming.patch
+  echo "  $(wc -l < /tmp/incoming.patch) lines"
+  git apply --stat /tmp/incoming.patch
+  git apply /tmp/incoming.patch
+  echo "→ patch applied"
+fi
+`
+
+// remoteSetupLinux is the Linux equivalent of remoteSetupDarwin.
+const remoteSetupLinux = `
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+export PATH="$HOME/.local/bin:$PATH"
+
+echo "→ host: $(hostname) $(uname -m) $(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-linux}")"
+
+if ! command -v bazel &>/dev/null && ! command -v bazelisk &>/dev/null; then
+  echo "→ installing bazelisk..."
+  ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq curl ca-certificates
+  mkdir -p "$HOME/.local/bin"
+  curl -fsSL \
+    "https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-${ARCH}" \
+    -o "$HOME/.local/bin/bazelisk"
+  chmod +x "$HOME/.local/bin/bazelisk"
+  ln -sf "$HOME/.local/bin/bazelisk" "$HOME/.local/bin/bazel"
+fi
+echo "→ bazel: $(bazel version 2>&1 | grep -E 'Bazelisk version|Build label' | head -1)"
+
+SLUG=$(echo "${ENVOY_REPO}" | tr '/' '_')
+WORK_DIR="${HOME}/envoy-builder/${SLUG}"
+SRC_DIR="${WORK_DIR}/src"
+mkdir -p "${WORK_DIR}"
+
+CLONE_URL="https://github.com/${ENVOY_REPO}.git"
+if [[ -d "${SRC_DIR}/.git" ]]; then
+  echo "→ updating existing clone..."
+  cd "${SRC_DIR}"
+  git remote set-url origin "${CLONE_URL}"
+  git fetch --depth=1 origin "${COMMIT_SHA}" 2>&1 | tail -3
+  git reset --hard FETCH_HEAD
+  git clean -fdx --exclude=.cache 2>/dev/null || true
+else
+  echo "→ cloning ${ENVOY_REPO} at ${COMMIT_SHA}..."
+  git clone --depth=1 --no-checkout "${CLONE_URL}" "${SRC_DIR}"
+  cd "${SRC_DIR}"
+  git fetch --depth=1 origin "${COMMIT_SHA}" 2>&1 | tail -3
+  git checkout FETCH_HEAD
+fi
+cd "${SRC_DIR}"
+echo "→ at $(git rev-parse HEAD)"
+
+if [[ -n "${PATCH_FILE:-}" ]]; then
+  echo "→ applying uploaded patch: ${PATCH_FILE}"
+  git apply --stat "${PATCH_FILE}"
+  git apply "${PATCH_FILE}"
+  echo "→ patch applied"
+elif [[ -n "${PATCH_URL:-}" ]]; then
+  echo "→ fetching patch: ${PATCH_URL}"
+  curl -fsSL "${PATCH_URL}" -o /tmp/incoming.patch
+  echo "  $(wc -l < /tmp/incoming.patch) lines"
+  git apply --stat /tmp/incoming.patch
+  git apply /tmp/incoming.patch
+  echo "→ patch applied"
+fi
+`
+
+// remoteQueryActionDarwin is appended after remoteSetupDarwin for query runs.
+// QUERY_EXPR must be exported by the prologue. Each result label is emitted
+// with a QUERY_RESULT: prefix; Bazel progress/errors are written inline so
+// they appear in the terminal stream without interfering with result parsing.
+const remoteQueryActionDarwin = `
+echo "→ bazel query: ${QUERY_EXPR}"
+bazel query --output=label --order_output=no "${QUERY_EXPR}" 2>/tmp/bq-err.log \
+  | while IFS= read -r line; do
+    printf 'QUERY_RESULT:%s\n' "$line"
+  done
+cat /tmp/bq-err.log 2>/dev/null || true
+`
+
+// remoteQueryActionLinux is identical to the Darwin variant; bazel query
+// syntax is platform-independent.
+const remoteQueryActionLinux = remoteQueryActionDarwin
+
+// remoteTestActionDarwin is appended after remoteSetupDarwin for test runs.
+// TEST_TARGETS (array) and TEST_FILTER (string, may be empty) must be exported
+// by the prologue. Emits TEST_RESULT:PASS or TEST_RESULT:FAIL:<exit_code>.
+const remoteTestActionDarwin = `
+BAZELRC_CACHE="${WORK_DIR}/.bazelrc.cache"
+rm -f "${BAZELRC_CACHE}"
+trap 'rm -f "${BAZELRC_CACHE}"' EXIT
+BAZEL_CACHE_ARGS=()
+if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
+  cat > "${BAZELRC_CACHE}" << EOF
+build --remote_cache=grpcs://remote.buildbuddy.io
+build --remote_header=x-buildbuddy-api-key=${BUILDBUDDY_API_KEY}
+build --remote_upload_local_results
+build --remote_timeout=3600
+EOF
+  BAZEL_CACHE_ARGS=("--bazelrc=${BAZELRC_CACHE}")
+  echo "→ BuildBuddy remote cache enabled"
+else
+  echo "→ no BUILDBUDDY_API_KEY — local cache only"
+fi
+
+echo "→ bazel test starting (--jobs=${BAZEL_JOBS})..."
+FILTER_ARGS=()
+if [[ -n "${TEST_FILTER:-}" ]]; then
+  FILTER_ARGS=("--test_filter=${TEST_FILTER}")
+fi
+bazel \
+  ${BAZEL_CACHE_ARGS[@]+"${BAZEL_CACHE_ARGS[@]}"} \
+  test \
+  --compilation_mode=opt \
+  --curses=no \
+  --verbose_failures \
+  "--linkopt=-Wl,-framework,SystemConfiguration" \
+  --macos_minimum_os=11.0 \
+  --host_macos_minimum_os=11.0 \
+  --test_output=streamed \
+  --jobs="${BAZEL_JOBS}" \
+  ${FILTER_ARGS[@]+"${FILTER_ARGS[@]}"} \
+  ${BAZEL_EXTRA_ARGS[@]+"${BAZEL_EXTRA_ARGS[@]}"} \
+  "${TEST_TARGETS[@]}"
+TEST_STATUS=$?
+if [[ "${TEST_STATUS}" -eq 0 ]]; then
+  echo "TEST_RESULT:PASS"
+else
+  echo "TEST_RESULT:FAIL:${TEST_STATUS}"
+fi
+`
+
+// remoteTestActionLinux is the Linux equivalent (uses --config=linux, no macOS flags).
+const remoteTestActionLinux = `
+BAZELRC_CACHE="${WORK_DIR}/.bazelrc.cache"
+rm -f "${BAZELRC_CACHE}"
+trap 'rm -f "${BAZELRC_CACHE}"' EXIT
+BAZEL_CACHE_ARGS=()
+if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
+  cat > "${BAZELRC_CACHE}" << EOF
+build --remote_cache=grpcs://remote.buildbuddy.io
+build --remote_header=x-buildbuddy-api-key=${BUILDBUDDY_API_KEY}
+build --remote_upload_local_results
+build --remote_timeout=3600
+EOF
+  BAZEL_CACHE_ARGS=("--bazelrc=${BAZELRC_CACHE}")
+  echo "→ BuildBuddy remote cache enabled"
+else
+  echo "→ no BUILDBUDDY_API_KEY — local cache only"
+fi
+
+echo "→ bazel test starting (--jobs=${BAZEL_JOBS})..."
+FILTER_ARGS=()
+if [[ -n "${TEST_FILTER:-}" ]]; then
+  FILTER_ARGS=("--test_filter=${TEST_FILTER}")
+fi
+bazel \
+  ${BAZEL_CACHE_ARGS[@]+"${BAZEL_CACHE_ARGS[@]}"} \
+  test \
+  --config=linux \
+  --compilation_mode=opt \
+  --curses=no \
+  --verbose_failures \
+  --test_output=streamed \
+  --jobs="${BAZEL_JOBS}" \
+  ${FILTER_ARGS[@]+"${FILTER_ARGS[@]}"} \
+  ${BAZEL_EXTRA_ARGS[@]+"${BAZEL_EXTRA_ARGS[@]}"} \
+  "${TEST_TARGETS[@]}"
+TEST_STATUS=$?
+if [[ "${TEST_STATUS}" -eq 0 ]]; then
+  echo "TEST_RESULT:PASS"
+else
+  echo "TEST_RESULT:FAIL:${TEST_STATUS}"
+fi
 `

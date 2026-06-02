@@ -80,7 +80,7 @@ func init() {
 	f := buildCmd.Flags()
 	f.StringVar(&bf.envoyRepo, "repo", "envoyproxy/envoy", "Source repository (owner/repo); forks work")
 	f.StringVar(&bf.commitSHA, "sha", "", "Commit SHA, branch, or tag to build (or pass envoy-<sha> as positional arg)")
-	f.StringVar(&bf.patchURL, "patch", "", "Raw URL to a .patch file applied before build")
+	f.StringVar(&bf.patchURL, "patch", "", "Patch to apply before build: https:// URL or file:// local path")
 	f.StringVar(&bf.releaseTag, "tag", "", "Release tag (default: envoy-{sha8}); override for patch/variant builds, e.g. envoy-abcdef12-patched")
 	f.BoolVar(&bf.noRelease, "no-release", false, "Build only — skip release creation and upload")
 	f.BoolVar(&bf.forceBuild, "force-build", false, "Always rebuild even if the asset already exists in the release")
@@ -280,6 +280,13 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		okf("Release: %s", tag)
 	}
 
+	// Resolve patch: file:// paths are uploaded once here; the remote temp path
+	// is then passed to each per-platform builder as PatchFile.
+	patchURL, patchFile, err := preparePatch(cmd.Context(), bf.sshHost, bf.sshPort, bf.patchURL)
+	if err != nil {
+		return fmt.Errorf("prepare patch: %w", err)
+	}
+
 	// ── Build platforms that have no existing asset ───────────────────────────
 	for _, plat := range needsBuild {
 		platStr := string(plat)
@@ -300,7 +307,8 @@ func runBuild(cmd *cobra.Command, args []string) error {
 			SSHPort:   bf.sshPort,
 			EnvoyRepo: bf.envoyRepo,
 			CommitSHA: sha,
-			PatchURL:  bf.patchURL,
+			PatchURL:  patchURL,
+			PatchFile: patchFile,
 			BazelJobs: bf.bazelJobs,
 			BazelArgs: append([]string(nil), bf.bazelArgs...),
 			BBKey:     bbKey,
@@ -342,13 +350,17 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		// ── Synchronous build ─────────────────────────────────────────────────
 		header("Remote build on %s [%s]", bf.sshHost, platStr)
 		localPath := fmt.Sprintf("%s/%s", outDir, pattern)
-		if err := bld.Run(cmd.Context(), localPath); err != nil {
+		abiLocalPath, err := bld.Run(cmd.Context(), localPath)
+		if err != nil {
 			if !bf.noRelease {
 				_ = ghMarkReleaseFailed(bf.ghRepo, tag)
 			}
 			return fmt.Errorf("build failed [%s]: %w", platStr, err)
 		}
 		okf("Binary: %s", localPath)
+		if abiLocalPath != "" {
+			okf("ABI header: %s", abiLocalPath)
+		}
 
 		// Write params JSON alongside the binary.
 		params := buildParams{
@@ -373,6 +385,13 @@ func runBuild(cmd *cobra.Command, args []string) error {
 			// Upload params sidecar.
 			if err := ghUploadAsset(bf.ghRepo, tag, paramsPath); err != nil {
 				return fmt.Errorf("upload params [%s]: %w", platStr, err)
+			}
+			// Upload abi.h once (platform-independent). Skip if another
+			// platform's build already uploaded it to this release.
+			if abiLocalPath != "" && !ghAssetExists(bf.ghRepo, tag, "abi.h") {
+				if err := ghUploadAsset(bf.ghRepo, tag, abiLocalPath); err != nil {
+					return fmt.Errorf("upload abi.h [%s]: %w", platStr, err)
+				}
 			}
 			okf("Asset uploaded: %s", pattern)
 		}
@@ -446,6 +465,16 @@ func ghEnsureRelease(repo, tag, body string) error {
 	)
 }
 
+// ghAssetExists returns true if the named asset already exists in the release.
+func ghAssetExists(repo, tag, assetName string) bool {
+	out, err := exec.Command("gh", "release", "view", tag,
+		"--repo", repo,
+		"--json", "assets",
+		"--jq", fmt.Sprintf(`.assets[] | select(.name == "%s") | .name`, assetName),
+	).Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
+}
+
 func ghUploadAsset(repo, tag, localPath string) error {
 	return ghRun("release", "upload", tag, localPath,
 		"--repo", repo,
@@ -509,36 +538,3 @@ func warnf(format string, args ...any) {
 	fmt.Printf("\033[33m⚠\033[0m  "+format+"\n", args...)
 }
 
-// resolveRef resolves a branch name, tag, or short SHA to the full 40-char
-// commit SHA via the GitHub API. If ref is already a full 40-char hex SHA it
-// is returned unchanged without a network call.
-func resolveRef(repo, ref string) (string, error) {
-	if isFullSHA(ref) {
-		return ref, nil
-	}
-	cmd := exec.Command("gh", "api",
-		fmt.Sprintf("repos/%s/commits/%s", repo, ref),
-		"--jq", ".sha",
-	)
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("resolve ref %q in %s: %w", ref, repo, err)
-	}
-	full := strings.TrimSpace(string(out))
-	if !isFullSHA(full) {
-		return "", fmt.Errorf("unexpected SHA from GitHub API: %q", full)
-	}
-	return full, nil
-}
-
-func isFullSHA(s string) bool {
-	if len(s) != 40 {
-		return false
-	}
-	for _, c := range s {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return false
-		}
-	}
-	return true
-}
