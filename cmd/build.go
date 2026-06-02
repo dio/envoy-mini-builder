@@ -486,6 +486,8 @@ func ghPublishRelease(repo, tag string) error {
 	return ghRun("release", "edit", tag,
 		"--repo", repo,
 		"--draft=false",
+		"--prerelease=false",
+		"--title", tag,
 	)
 }
 
