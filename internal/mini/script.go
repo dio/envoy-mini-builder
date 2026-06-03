@@ -57,7 +57,9 @@ if [[ -d "${SRC_DIR}/.git" ]]; then
   # Reset tracked files before checkout so prior patches/bazelrc edits don't
   # contaminate this build. git clean handles untracked; git reset handles tracked.
   git reset --hard FETCH_HEAD
-  git clean -fdx --exclude=.cache 2>/dev/null || true
+  if [[ "${SKIP_CLEAN:-}" != "1" ]]; then
+    git clean -fdx --exclude=.cache 2>/dev/null || true
+  fi
 else
   echo "→ cloning ${ENVOY_REPO} at ${COMMIT_SHA}..."
   git clone --depth=1 --no-checkout "${CLONE_URL}" "${SRC_DIR}"
@@ -238,7 +240,9 @@ if [[ -d "${SRC_DIR}/.git" ]]; then
   git remote set-url origin "${CLONE_URL}"
   git fetch --depth=1 origin "${COMMIT_SHA}" 2>&1 | tail -3
   git reset --hard FETCH_HEAD
-  git clean -fdx --exclude=.cache 2>/dev/null || true
+  if [[ "${SKIP_CLEAN:-}" != "1" ]]; then
+    git clean -fdx --exclude=.cache 2>/dev/null || true
+  fi
 else
   echo "→ cloning ${ENVOY_REPO} at ${COMMIT_SHA}..."
   git clone --depth=1 --no-checkout "${CLONE_URL}" "${SRC_DIR}"
@@ -347,7 +351,9 @@ if [[ -d "${SRC_DIR}/.git" ]]; then
   git remote set-url origin "${CLONE_URL}"
   git fetch --depth=1 origin "${COMMIT_SHA}" 2>&1 | tail -3
   git reset --hard FETCH_HEAD
-  git clean -fdx --exclude=.cache 2>/dev/null || true
+  if [[ "${SKIP_CLEAN:-}" != "1" ]]; then
+    git clean -fdx --exclude=.cache 2>/dev/null || true
+  fi
 else
   echo "→ cloning ${ENVOY_REPO} at ${COMMIT_SHA}..."
   git clone --depth=1 --no-checkout "${CLONE_URL}" "${SRC_DIR}"
@@ -407,7 +413,9 @@ if [[ -d "${SRC_DIR}/.git" ]]; then
   git remote set-url origin "${CLONE_URL}"
   git fetch --depth=1 origin "${COMMIT_SHA}" 2>&1 | tail -3
   git reset --hard FETCH_HEAD
-  git clean -fdx --exclude=.cache 2>/dev/null || true
+  if [[ "${SKIP_CLEAN:-}" != "1" ]]; then
+    git clean -fdx --exclude=.cache 2>/dev/null || true
+  fi
 else
   echo "→ cloning ${ENVOY_REPO} at ${COMMIT_SHA}..."
   git clone --depth=1 --no-checkout "${CLONE_URL}" "${SRC_DIR}"

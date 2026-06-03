@@ -18,6 +18,7 @@ type queryFlags struct {
 	bazelJobs string
 	bbKey     string
 	path      string
+	noClean   bool
 }
 
 var qf queryFlags
@@ -53,6 +54,7 @@ func init() {
 	f.StringVar(&qf.bazelJobs, "jobs", "HOST_CPUS", "Bazel --jobs value")
 	f.StringVar(&qf.bbKey, "bb-key", "", "BuildBuddy API key (optional)")
 	f.StringVar(&qf.path, "path", "...", "Bazel package path to search (e.g. test/extensions/clusters/...)")
+	f.BoolVar(&qf.noClean, "no-clean", false, "Skip git clean -fdx before querying")
 
 	rootCmd.AddCommand(queryCmd)
 }
@@ -95,6 +97,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		PatchFile: patchFile,
 		BazelJobs: qf.bazelJobs,
 		BBKey:     qf.bbKey,
+		SkipClean: qf.noClean,
 		Platform:  mini.Platform(qf.platform),
 	})
 

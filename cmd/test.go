@@ -18,6 +18,7 @@ type testSharedFlags struct {
 	sshPort   int
 	bazelJobs string
 	bbKey     string
+	noClean   bool
 }
 
 var testCmd = &cobra.Command{
@@ -105,6 +106,7 @@ func runTestLs(cmd *cobra.Command, args []string) error {
 		PatchFile: patchFile,
 		BazelJobs: tlf.bazelJobs,
 		BBKey:     tlf.bbKey,
+		SkipClean: tlf.noClean,
 		Platform:  mini.Platform(tlf.platform),
 	})
 
@@ -205,6 +207,7 @@ func runTestRun(cmd *cobra.Command, args []string) error {
 		PatchFile: patchFile,
 		BazelJobs: trf.bazelJobs,
 		BBKey:     trf.bbKey,
+		SkipClean: trf.noClean,
 		Platform:  mini.Platform(trf.platform),
 	})
 
@@ -230,4 +233,5 @@ func addSharedTestFlags(cmd *cobra.Command, sf *testSharedFlags) {
 	f.IntVar(&sf.sshPort, "port", 22, "SSH port")
 	f.StringVar(&sf.bazelJobs, "jobs", "HOST_CPUS", "Bazel --jobs value")
 	f.StringVar(&sf.bbKey, "bb-key", "", "BuildBuddy API key (optional, speeds up compilation)")
+	f.BoolVar(&sf.noClean, "no-clean", false, "Skip git clean -fdx before running (preserves Bazel artifacts for incremental builds)")
 }

@@ -251,6 +251,7 @@ type Config struct {
 	BazelArgs []string
 	BBKey     string   // BuildBuddy API key for current platform; empty = local cache only
 	NoStrip   bool     // skip post-build strip (useful for symbol analysis)
+	SkipClean bool     // skip git clean -fdx (preserves untracked build artifacts for incremental builds)
 	Platform  Platform // target platform; defaults to PlatformDarwinArm64 if zero
 }
 
@@ -566,6 +567,10 @@ func (b *Builder) buildPrologue() string {
 	if b.cfg.NoStrip {
 		skipStrip = "1"
 	}
+	skipClean := ""
+	if b.cfg.SkipClean {
+		skipClean = "1"
+	}
 	vars := map[string]string{
 		"ENVOY_REPO":         b.cfg.EnvoyRepo,
 		"COMMIT_SHA":         b.cfg.CommitSHA,
@@ -574,10 +579,11 @@ func (b *Builder) buildPrologue() string {
 		"BAZEL_JOBS":         b.cfg.BazelJobs,
 		"BUILDBUDDY_API_KEY": b.cfg.BBKey,
 		"SKIP_STRIP":         skipStrip,
+		"SKIP_CLEAN":         skipClean,
 	}
 	var sb strings.Builder
 	// Emit in a deterministic order so scripts are stable across runs.
-	for _, k := range []string{"ENVOY_REPO", "COMMIT_SHA", "PATCH_URL", "PATCH_FILE", "BAZEL_JOBS", "BUILDBUDDY_API_KEY", "SKIP_STRIP"} {
+	for _, k := range []string{"ENVOY_REPO", "COMMIT_SHA", "PATCH_URL", "PATCH_FILE", "BAZEL_JOBS", "BUILDBUDDY_API_KEY", "SKIP_STRIP", "SKIP_CLEAN"} {
 		fmt.Fprintf(&sb, "%s=%s\n", k, shellQuote(vars[k]))
 	}
 	sb.WriteString("BAZEL_EXTRA_ARGS=(\n")
@@ -585,7 +591,7 @@ func (b *Builder) buildPrologue() string {
 		fmt.Fprintf(&sb, "  %s\n", shellQuote(arg))
 	}
 	sb.WriteString(")\n")
-	sb.WriteString("export ENVOY_REPO COMMIT_SHA PATCH_URL PATCH_FILE BAZEL_JOBS BUILDBUDDY_API_KEY\n")
+	sb.WriteString("export ENVOY_REPO COMMIT_SHA PATCH_URL PATCH_FILE BAZEL_JOBS BUILDBUDDY_API_KEY SKIP_CLEAN\n")
 	return sb.String()
 }
 

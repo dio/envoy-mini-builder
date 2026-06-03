@@ -24,6 +24,7 @@ type buildFlags struct {
 	outDir       string
 	suffix       string
 	noStrip      bool
+	noClean      bool
 	platform     string
 	allPlatforms bool
 	sshHost      string
@@ -87,6 +88,7 @@ func init() {
 	f.StringVar(&bf.outDir, "out", "./dist", "Local directory to save the downloaded binary")
 	f.StringVar(&bf.suffix, "suffix", "", "Suffix appended to binary and asset names (e.g. -patched → envoy-darwin-arm64-patched)")
 	f.BoolVar(&bf.noStrip, "no-strip", false, "Skip post-build strip (useful for symbol analysis)")
+	f.BoolVar(&bf.noClean, "no-clean", false, "Skip git clean -fdx before build (preserves Bazel artifacts for incremental builds)")
 	f.StringVar(&bf.platform, "platform", string(mini.PlatformDarwinArm64), "Target platform: darwin-arm64 | linux-arm64 | linux-amd64")
 	f.BoolVar(&bf.allPlatforms, "all-platforms", false, "Build for all supported platforms sequentially under one release")
 	f.StringVar(&bf.sshHost, "host", "dio@mini", "SSH host for the Mac mini")
@@ -320,6 +322,7 @@ func runBuild(cmd *cobra.Command, args []string) error {
 			BazelArgs: append([]string(nil), bf.bazelArgs...),
 			BBKey:     bbKey,
 			NoStrip:   bf.noStrip,
+			SkipClean: bf.noClean,
 			Platform:  plat,
 		})
 
