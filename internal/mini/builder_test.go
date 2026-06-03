@@ -142,7 +142,7 @@ printf 'BINARY_PATH:/tmp/envoy\n'
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	b := NewBuilder(Config{SSHHost: "dio@mini", SSHPort: 2222})
-	got, err := b.execScript(context.Background(), remoteScriptRunnerDarwin, "echo build\n")
+	got, _, err := b.execScript(context.Background(), remoteScriptRunnerDarwin, "echo build\n")
 	if err != nil {
 		t.Fatalf("execScript returned error: %v", err)
 	}
@@ -171,7 +171,7 @@ printf 'normal log line\n'
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	b := NewBuilder(Config{SSHHost: "mini", SSHPort: 22})
-	_, err := b.execScript(context.Background(), remoteScriptRunnerDarwin, "echo build\n")
+	_, _, err := b.execScript(context.Background(), remoteScriptRunnerDarwin, "echo build\n")
 	if err == nil || !strings.Contains(err.Error(), "BINARY_PATH sentinel") {
 		t.Fatalf("execScript error = %v, want missing sentinel error", err)
 	}
@@ -189,7 +189,7 @@ exit 42
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	b := NewBuilder(Config{SSHHost: "mini", SSHPort: 22})
-	_, err := b.execScript(context.Background(), remoteScriptRunnerDarwin, "echo build\n")
+	_, _, err := b.execScript(context.Background(), remoteScriptRunnerDarwin, "echo build\n")
 	if err == nil {
 		t.Fatal("execScript succeeded, want failure")
 	}
